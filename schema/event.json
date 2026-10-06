@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hub.example/schema/event.json",
+  "title": "Event model",
+  "description": "Server-pushed event delivered as a JSON-RPC notification (method=event). Unknown event types MUST be ignored by clients.",
+  "type": "object",
+  "required": ["id", "type", "time"],
+  "properties": {
+    "id": { "type": "string", "examples": ["ev-1"] },
+    "type": { "type": "string", "description": "See PROTOCOL.md §4.5 for the known types; new types are additive." },
+    "time": { "$ref": "common.json#/definitions/timestamp" },
+    "node_id": { "type": ["string", "null"] },
+    "task_id": { "type": ["string", "null"] },
+    "command_id": { "type": ["string", "null"] },
+    "data": { "type": "object", "description": "Per-type payload; opaque for unknown types." }
+  },
+  "additionalProperties": true
+}

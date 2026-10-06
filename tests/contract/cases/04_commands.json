@@ -1,0 +1,86 @@
+[
+  {
+    "name": "command.send 异步接受后完成（事件驱动验证）",
+    "request": {"method": "command.send", "params": {"node_id": "n-1", "method": "echo", "params": {"text": "hello"}, "timeout": 5000}},
+    "expect": {
+      "result": {"$.command.node_id": "n-1", "$.command.method": "echo"},
+      "wait_event": {
+        "type": "command.result",
+        "node_id": "n-1",
+        "check": {"$.data.id": "@command_id", "$.data.status": "succeeded", "$.data.result.text": "hello"}
+      }
+    },
+    "save": {"command_id": "$.command.id"}
+  },
+  {
+    "name": "command.send 相同幂等键首次返回其指令",
+    "request": {"method": "command.send", "params": {"node_id": "n-2", "method": "echo", "params": {"text": "dedupe"}, "idempotency_key": "ik-contract-1"}},
+    "expect": {
+      "wait_event": {"type": "command.result", "node_id": "n-2", "check": {"$.data.id": "@dedupe_command_id", "$.data.status": "succeeded", "$.data.result.text": "dedupe"}}
+    },
+    "save": {"dedupe_command_id": "$.command.id"}
+  },
+  {
+    "name": "command.send 幂等键重复调用复用首次结果",
+    "request": {"method": "command.send", "params": {"node_id": "n-2", "method": "echo", "params": {"text": "dedupe-changed"}, "idempotency_key": "ik-contract-1"}},
+    "expect": {
+      "result": {"$.command.id": "@dedupe_command_id", "$.command.result.text": "dedupe", "$.command.status": "succeeded"}
+    }
+  },
+  {
+    "name": "command.send fail 指令返回失败",
+    "request": {"method": "command.send", "params": {"node_id": "n-1", "method": "fail", "timeout": 5000}},
+    "expect": {
+      "wait_event": {"type": "command.failed", "node_id": "n-1", "check": {"$.data.id": "@fail_command_id", "$.data.status": "failed"}}
+    },
+    "save": {"fail_command_id": "$.command.id"}
+  },
+  {
+    "name": "command.send sleep 指令完成",
+    "request": {"method": "command.send", "params": {"node_id": "n-3", "method": "sleep", "params": {"ms": 50}, "timeout": 5000}},
+    "expect": {
+      "wait_event": {"type": "command.result", "node_id": "n-3", "check": {"$.data.id": "@sleep_command_id", "$.data.status": "succeeded"}}
+    },
+    "save": {"sleep_command_id": "$.command.id"}
+  },
+  {
+    "name": "command.send 节点不存在返回 -32010",
+    "request": {"method": "command.send", "params": {"node_id": "n-999", "method": "echo"}},
+    "expect": {"error_code": -32010}
+  },
+  {
+    "name": "command.batch 批量下发同步完成",
+    "request": {
+      "method": "command.batch",
+      "params": {"commands": [{"node_id": "n-1", "method": "echo", "params": {"text": "a"}}, {"node_id": "n-2", "method": "fail"}]}
+    },
+    "expect": {
+      "result": {
+        "$.commands.length": 2,
+        "$.commands[0].status": "succeeded",
+        "$.commands[1].status": "failed"
+      }
+    }
+  },
+  {
+    "name": "command.cancel 取消运行中的指令",
+    "request": {"method": "command.send", "params": {"node_id": "n-3", "method": "sleep", "params": {"ms": 5000}, "timeout": 10000}},
+    "expect": {"result": {"$.command.id": {"$type": "string"}}},
+    "save": {"cancel_command_id": "$.command.id"}
+  },
+  {
+    "name": "command.cancel 运行中指令返回 cancelled",
+    "request": {"method": "command.cancel", "params": {"command_id": "@cancel_command_id"}},
+    "expect": {"result": {"$.command.status": "cancelled"}}
+  },
+  {
+    "name": "command.cancel 已完成的指令返回 -32014",
+    "request": {"method": "command.cancel", "params": {"command_id": "@command_id"}},
+    "expect": {"error_code": -32014}
+  },
+  {
+    "name": "command.cancel 不存在的指令返回 -32013",
+    "request": {"method": "command.cancel", "params": {"command_id": "c-999"}},
+    "expect": {"error_code": -32013}
+  }
+]

@@ -1,0 +1,40 @@
+[{
+  "name": "auth.login 返回 bearer token",
+  "mode": "token",
+  "request": {"method": "auth.login", "params": {"token": "secret-token"}},
+  "expect": {
+    "result": {"$.token_type": "bearer", "$.expires_in": 3600}
+  },
+  "save": {"access_token": "$.access_token", "refresh_token": "$.refresh_token"}
+},
+{
+  "name": "auth.login 错误凭证返回 -32002",
+  "mode": "token",
+  "request": {"method": "auth.login", "params": {"token": "wrong"}},
+  "expect": {"error_code": -32002}
+},
+{
+  "name": "auth.refresh 换发新 token",
+  "mode": "token",
+  "request": {"method": "auth.refresh", "params": {"refresh_token": "@refresh_token"}},
+  "expect": {"result": {"$.token_type": "bearer"}},
+  "save": {"access_token": "$.access_token", "refresh_token": "$.refresh_token"}
+},
+{
+  "name": "auth.logout 注销指定 token",
+  "mode": "token",
+  "request": {"method": "auth.logout", "params": {"access_token": "@access_token"}},
+  "expect": {"result": {}}
+},
+{
+  "name": "auth.logout 后旧 refresh_token 失效",
+  "mode": "token",
+  "request": {"method": "auth.refresh", "params": {"refresh_token": "@refresh_token"}},
+  "expect": {"error_code": -32002}
+},
+{
+  "name": "auth.refresh 无效 refresh_token 返回 -32002",
+  "mode": "token",
+  "request": {"method": "auth.refresh", "params": {"refresh_token": "invalid"}},
+  "expect": {"error_code": -32002}
+}]

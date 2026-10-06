@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hub.example/schema/command.json",
+  "title": "Command model",
+  "description": "A single command sent to a node. Fields may be absent before completion; consumers MUST tolerate missing fields.",
+  "type": "object",
+  "required": ["id", "node_id", "method", "status"],
+  "properties": {
+    "id": { "type": "string", "examples": ["c-1"] },
+    "node_id": { "type": "string" },
+    "method": { "type": "string", "examples": ["echo"] },
+    "params": { "type": "object", "description": "Opaque to the engine." },
+    "status": { "type": "string", "enum": ["pending", "accepted", "running", "succeeded", "failed", "cancelled", "timeout"] },
+    "result": {},
+    "error": { "$ref": "common.json#/definitions/error_object" },
+    "timeout": { "type": "integer", "minimum": 0, "description": "Milliseconds, 0 = no timeout." },
+    "created_at": { "$ref": "common.json#/definitions/timestamp" },
+    "started_at": { "$ref": "common.json#/definitions/timestamp" },
+    "finished_at": { "$ref": "common.json#/definitions/timestamp" },
+    "idempotency_key": { "type": "string", "description": "Dedupe key: repeated send with same key returns the first result within TTL." },
+    "task_id": { "type": ["string", "null"], "description": "Owning task, if any." }
+  },
+  "additionalProperties": true
+}

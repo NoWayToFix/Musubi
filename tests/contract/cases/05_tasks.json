@@ -1,0 +1,76 @@
+[
+  {
+    "name": "task.create 串行执行并完成",
+    "request": {
+      "method": "task.create",
+      "params": {
+        "name": "deploy",
+        "commands": [
+          {"node_id": "n-1", "method": "echo", "params": {"text": "step1"}},
+          {"node_id": "n-2", "method": "echo", "params": {"text": "step2"}}
+        ],
+        "parallel": false
+      }
+    },
+    "expect": {
+      "result": {"$.task.name": "deploy", "$.task.command_ids.length": 2},
+      "wait_event": {
+        "type": "task.completed",
+        "task_id": "@task_id",
+        "check": {"$.data.status": "succeeded", "$.data.progress": 1, "$.data.command_ids.length": 2}
+      }
+    },
+    "save": {"task_id": "$.task.id"}
+  },
+  {
+    "name": "task.create 部分失败任务终态为 partial",
+    "request": {
+      "method": "task.create",
+      "params": {"name": "partial-deploy", "commands": [{"node_id": "n-1", "method": "echo"}, {"node_id": "n-2", "method": "fail"}]}
+    },
+    "expect": {
+      "wait_event": {
+        "type": "task.completed",
+        "task_id": "@partial_task_id",
+        "check": {"$.data.status": "partial"}
+      }
+    },
+    "save": {"partial_task_id": "$.task.id"}
+  },
+  {
+    "name": "task.get 获取任务详情",
+    "request": {"method": "task.get", "params": {"task_id": "@task_id"}},
+    "expect": {"result": {"$.task.id": "@task_id", "$.task.status": "succeeded"}}
+  },
+  {
+    "name": "task.get 不存在返回 -32020",
+    "request": {"method": "task.get", "params": {"task_id": "t-999"}},
+    "expect": {"error_code": -32020}
+  },
+  {
+    "name": "task.list 列出任务",
+    "request": {"method": "task.list", "params": {}},
+    "expect": {"result": {"$.tasks.length": {"$type": "number"}, "$.total": {"$type": "number"}}}
+  },
+  {
+    "name": "task.cancel 取消运行中的任务",
+    "request": {"method": "task.create", "params": {"name": "long-task", "commands": [{"node_id": "n-3", "method": "sleep", "params": {"ms": 10000}, "timeout": 20000}]}},
+    "expect": {"result": {"$.task.id": {"$type": "string"}}},
+    "save": {"cancel_task_id": "$.task.id"}
+  },
+  {
+    "name": "task.cancel 运行中任务返回 cancelled",
+    "request": {"method": "task.cancel", "params": {"task_id": "@cancel_task_id"}},
+    "expect": {"result": {"$.task.status": "cancelled"}}
+  },
+  {
+    "name": "task.cancel 已完成任务返回 -32021",
+    "request": {"method": "task.cancel", "params": {"task_id": "@task_id"}},
+    "expect": {"error_code": -32021}
+  },
+  {
+    "name": "task.cancel 不存在任务返回 -32020",
+    "request": {"method": "task.cancel", "params": {"task_id": "t-999"}},
+    "expect": {"error_code": -32020}
+  }
+]

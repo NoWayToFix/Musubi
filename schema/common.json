@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hub.example/schema/common.json",
+  "title": "Common types",
+  "description": "JSON-RPC envelope, ids, timestamps, errors. Shared by all methods.",
+  "definitions": {
+    "id": {
+      "description": "JSON-RPC request id: number or string.",
+      "oneOf": [{ "type": "integer" }, { "type": "string" }]
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO-8601 UTC, e.g. 2026-10-05T12:00:00.000Z"
+    },
+    "error_object": {
+      "type": "object",
+      "required": ["code", "message"],
+      "properties": {
+        "code": { "type": "integer" },
+        "message": { "type": "string" },
+        "data": { "type": "object", "description": "Optional, must be an object. Additional fields per error code." }
+      },
+      "additionalProperties": false
+    },
+    "request": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "method"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/definitions/id" },
+        "method": { "type": "string" },
+        "params": { "type": "object", "description": "Unknown fields MUST be ignored by the server." }
+      },
+      "additionalProperties": true
+    },
+    "response": {
+      "type": "object",
+      "required": ["jsonrpc", "id"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/definitions/id" },
+        "result": {},
+        "error": { "$ref": "#/definitions/error_object" }
+      },
+      "additionalProperties": false
+    },
+    "notification": {
+      "type": "object",
+      "required": ["jsonrpc", "method"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "method": { "type": "string" },
+        "params": { "type": "object" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

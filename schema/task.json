@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hub.example/schema/task.json",
+  "title": "Task model",
+  "description": "A task is a collection of commands with aggregate status and progress.",
+  "type": "object",
+  "required": ["id", "name", "status"],
+  "properties": {
+    "id": { "type": "string", "examples": ["t-1"] },
+    "name": { "type": "string", "examples": ["deploy"] },
+    "status": { "type": "string", "enum": ["pending", "running", "succeeded", "failed", "cancelled", "partial"] },
+    "progress": { "type": "number", "minimum": 0, "maximum": 1 },
+    "command_ids": { "type": "array", "items": { "type": "string" } },
+    "error": { "$ref": "common.json#/definitions/error_object" },
+    "created_at": { "$ref": "common.json#/definitions/timestamp" },
+    "updated_at": { "$ref": "common.json#/definitions/timestamp" }
+  },
+  "additionalProperties": true
+}

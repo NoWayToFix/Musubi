@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hub.example/schema/capability.json",
+  "title": "Capability, client_info, server_info",
+  "description": "Version negotiation and capability discovery payloads.",
+  "definitions": {
+    "capability": {
+      "type": "object",
+      "required": ["id", "version"],
+      "properties": {
+        "id": { "type": "string", "examples": ["node.registry"] },
+        "version": { "type": "string", "examples": ["1.0"] }
+      },
+      "additionalProperties": false
+    },
+    "client_info": {
+      "type": "object",
+      "description": "Sent by clients in engine.info. All fields optional. Unknown fields ignored.",
+      "properties": {
+        "name": { "type": "string", "examples": ["hub-ts"] },
+        "version": { "type": "string", "examples": ["1.0.0"] },
+        "protocol_versions": { "type": "array", "items": { "type": "string" }, "default": ["1.0"] },
+        "encodings": { "type": "array", "items": { "type": "string", "enum": ["json", "msgpack", "protobuf"] }, "default": ["json"] },
+        "transports": { "type": "array", "items": { "type": "string" }, "description": "Supported transports, e.g. ws, http, sse, poll." },
+        "features": { "type": "object", "additionalProperties": { "type": "boolean" } },
+        "platform": {
+          "type": "object",
+          "properties": {
+            "os": { "type": "string" },
+            "runtime": { "type": "string" },
+            "arch": { "type": "string" }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "server_info": {
+      "type": "object",
+      "required": ["protocol_version", "server", "supported_versions", "encodings", "transports"],
+      "properties": {
+        "protocol_version": { "type": "string", "description": "Negotiated version (highest common)." },
+        "server": {
+          "type": "object",
+          "required": ["name", "version"],
+          "properties": {
+            "name": { "type": "string" },
+            "version": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
+        "supported_versions": { "type": "array", "items": { "type": "string" } },
+        "encodings": { "type": "array", "items": { "type": "string" } },
+        "transports": { "type": "array", "items": { "type": "string" } },
+        "features": { "type": "object", "additionalProperties": { "type": "boolean" } },
+        "capabilities": { "type": "array", "items": { "$ref": "#/definitions/capability" } },
+        "session": {
+          "type": "object",
+          "properties": {
+            "authenticated": { "type": "boolean" },
+            "expires_at": { "$ref": "common.json#/definitions/timestamp" }
+          },
+          "additionalProperties": false
+        },
+        "server_time": { "$ref": "common.json#/definitions/timestamp" }
+      },
+      "additionalProperties": true
+    }
+  }
+}

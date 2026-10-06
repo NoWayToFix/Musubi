@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hub.example/schema/errors.json",
+  "title": "Error codes",
+  "description": "Stable error code registry (PROTOCOL.md §7). Codes are additive-only.",
+  "definitions": {
+    "jsonrpc": {
+      "type": "object",
+      "properties": {
+        "parse_error": { "const": -32700 },
+        "invalid_request": { "const": -32600 },
+        "method_not_found": { "const": -32601 },
+        "invalid_params": { "const": -32602 },
+        "internal_error": { "const": -32603 }
+      }
+    },
+    "domain": {
+      "type": "object",
+      "properties": {
+        "auth_required": { "const": -32001 },
+        "auth_invalid": { "const": -32002 },
+        "auth_expired": { "const": -32003 },
+        "auth_forbidden": { "const": -32004 },
+        "protocol_version_mismatch": { "const": -32005 },
+        "encoding_not_supported": { "const": -32006 },
+        "transport_not_supported": { "const": -32007 },
+        "node_not_found": { "const": -32010 },
+        "node_offline": { "const": -32011 },
+        "node_busy": { "const": -32012 },
+        "command_not_found": { "const": -32013 },
+        "command_cancel_rejected": { "const": -32014 },
+        "task_not_found": { "const": -32020 },
+        "task_cancel_rejected": { "const": -32021 },
+        "subscription_not_found": { "const": -32030 },
+        "event_type_not_supported": { "const": -32031 },
+        "feature_disabled": { "const": -32040 },
+        "rate_limited": { "const": -32041 }
+      }
+    }
+  }
+}

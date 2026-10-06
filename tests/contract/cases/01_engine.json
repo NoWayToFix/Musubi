@@ -1,0 +1,72 @@
+[
+  {
+    "name": "engine.info 返回协商后的协议版本与能力",
+    "request": {
+      "method": "engine.info",
+      "params": {
+        "client_info": {
+          "name": "contract-runner",
+          "version": "1.0.0",
+          "protocol_versions": ["1.0"],
+          "encodings": ["json"],
+          "transports": ["ws", "http", "sse", "poll"],
+          "features": {"batch": true},
+          "platform": {"os": "linux", "runtime": "python", "arch": "x64"}
+        }
+      }
+    },
+    "expect": {
+      "result": {
+        "$.protocol_version": "1.0",
+        "$.server.name": "hubd",
+        "$.session.authenticated": {"$type": "boolean"}
+      }
+    }
+  },
+  {
+    "name": "engine.info 未知客户端字段被忽略（向前兼容）",
+    "request": {
+      "method": "engine.info",
+      "params": {
+        "client_info": {
+          "protocol_versions": ["1.0"],
+          "future_field_xyz": {"anything": true}
+        }
+      }
+    },
+    "expect": {"result": {"$.protocol_version": "1.0"}}
+  },
+  {
+    "name": "engine.info 不支持的协议版本返回 -32005",
+    "request": {
+      "method": "engine.info",
+      "params": {"client_info": {"protocol_versions": ["99.0"]}}
+    },
+    "expect": {"error_code": -32005}
+  },
+  {
+    "name": "engine.ping 返回 pong",
+    "request": {"method": "engine.ping", "params": {}},
+    "expect": {"result": {"$.pong": true}}
+  },
+  {
+    "name": "engine.capabilities 包含核心能力",
+    "request": {"method": "engine.capabilities", "params": {}},
+    "expect": {
+      "result": {
+        "$.features.batch": true,
+        "$.features.subscribe": true
+      }
+    }
+  },
+  {
+    "name": "未知方法返回 -32601",
+    "request": {"method": "engine.no_such_method", "params": {}},
+    "expect": {"error_code": -32601}
+  },
+  {
+    "name": "缺失必填参数返回 -32602",
+    "request": {"method": "node.get", "params": {}},
+    "expect": {"error_code": -32602}
+  }
+]

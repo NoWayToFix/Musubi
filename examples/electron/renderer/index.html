@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'" />
+  <title>Control Hub — Electron example</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+    }
+    body {
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      margin: 0;
+      padding: 16px;
+      max-width: 900px;
+      margin: 0 auto;
+    }
+    h1 { font-size: 1.2rem; }
+    .status {
+      display: inline-block;
+      padding: 2px 10px;
+      border-radius: 12px;
+      font-size: 0.85rem;
+      background: #8882;
+      border: 1px solid #8884;
+    }
+    .status.online { background: #2e7d3222; border-color: #2e7d32; color: #2e7d32; }
+    .status.offline { background: #c6282822; border-color: #c62828; color: #c62828; }
+    section {
+      margin: 16px 0;
+      padding: 12px;
+      border: 1px solid #8883;
+      border-radius: 8px;
+    }
+    table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
+    th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid #8882; }
+    th { font-weight: 600; }
+    label { display: block; margin: 6px 0 2px; font-size: 0.85rem; }
+    input, select, textarea {
+      width: 100%;
+      box-sizing: border-box;
+      font: inherit;
+      padding: 4px 6px;
+    }
+    button {
+      margin-top: 8px;
+      font: inherit;
+      padding: 4px 14px;
+      cursor: pointer;
+    }
+    #log {
+      background: #0000000d;
+      border-radius: 6px;
+      padding: 8px;
+      max-height: 220px;
+      overflow: auto;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.8rem;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    .progress-track {
+      background: #8883;
+      border-radius: 6px;
+      height: 14px;
+      margin: 6px 0;
+      overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%;
+      width: 0%;
+      background: #1976d2;
+      transition: width 0.3s ease;
+    }
+    #cmd-result, #task-result {
+      font-family: ui-monospace, Menlo, monospace;
+      font-size: 0.8rem;
+      white-space: pre-wrap;
+    }
+  </style>
+</head>
+<body>
+  <h1>Control Hub <span class="status" id="conn-status">connecting…</span></h1>
+
+  <section>
+    <h2>Nodes</h2>
+    <table id="nodes-table">
+      <thead>
+        <tr><th>ID</th><th>Name</th><th>Status</th><th>Capabilities</th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <button id="refresh-nodes">Refresh nodes</button>
+  </section>
+
+  <section>
+    <h2>Send command</h2>
+    <label for="node-select">Node</label>
+    <select id="node-select"></select>
+    <label for="method-input">Method</label>
+    <input id="method-input" value="echo" placeholder="echo | fail | sleep" />
+    <label for="params-input">Params (JSON)</label>
+    <textarea id="params-input" rows="3">{"text": "hello from electron"}</textarea>
+    <button id="send-command">Send command</button>
+    <div id="cmd-result"></div>
+  </section>
+
+  <section>
+    <h2>Task</h2>
+    <button id="create-task">Create task (echo on all nodes)</button>
+    <div id="task-result"></div>
+    <div id="task-progress" style="display:none">
+      <div class="progress-track"><div class="progress-fill" id="task-progress-fill"></div></div>
+      <span id="task-progress-text"></span>
+    </div>
+  </section>
+
+  <section>
+    <h2>Event log</h2>
+    <div id="log">(no events yet — events stream in live from the hub)</div>
+  </section>
+
+  <script src="renderer.js"></script>
+</body>
+</html>

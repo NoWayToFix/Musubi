@@ -1,0 +1,24 @@
+[
+  {
+    "name": "JSON-RPC 数组批处理：多方法一次往返",
+    "request": {
+      "batch": [
+        {"jsonrpc": "2.0", "id": 1, "method": "engine.ping", "params": {}},
+        {"jsonrpc": "2.0", "id": 2, "method": "node.get", "params": {"node_id": "n-1"}},
+        {"jsonrpc": "2.0", "id": 3, "method": "node.get", "params": {"node_id": "n-999"}}
+      ]
+    },
+    "expect": {
+      "result": {
+        "$[0].result.pong": true,
+        "$[1].result.node.id": "n-1",
+        "$[2].error.code": -32010
+      }
+    }
+  },
+  {
+    "name": "空数组批处理返回错误",
+    "request": {"batch": []},
+    "expect": {"error_code": -32600}
+  }
+]

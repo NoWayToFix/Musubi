@@ -1,0 +1,50 @@
+[
+  {
+    "name": "事件流：command.result 事件被推送",
+    "request": {"method": "command.send", "params": {"node_id": "n-1", "method": "echo", "params": {"text": "event-test"}, "timeout": 5000}},
+    "expect": {
+      "wait_event": {
+        "type": "command.result",
+        "node_id": "n-1",
+        "check": {"$.data.status": "succeeded", "$.data.node_id": "n-1"}
+      }
+    }
+  },
+  {
+    "name": "事件流：task.progress 事件被推送",
+    "request": {"method": "task.create", "params": {"name": "event-task", "commands": [{"node_id": "n-1", "method": "sleep", "params": {"ms": 100}}]}},
+    "expect": {
+      "wait_event": {"type": "task.progress", "task_id": "@event_task_id", "check": {"$.data.progress": {"$type": "number"}}}
+    },
+    "save": {"event_task_id": "$.task.id"}
+  },
+  {
+    "name": "事件流：按 task_id 过滤订阅收到 task.completed",
+    "request": {"method": "task.create", "params": {"name": "filtered", "commands": [{"node_id": "n-3", "method": "echo"}]}},
+    "expect": {
+      "wait_event": {"type": "task.completed", "task_id": "@filtered_task_id", "check": {"$.data.status": "succeeded"}}
+    },
+    "save": {"filtered_task_id": "$.task.id"}
+  },
+  {
+    "name": "事件流：未知事件类型订阅返回 -32031",
+    "request": {"method": "event.subscribe", "params": {"event_types": ["no.such.event"]}},
+    "expect": {"error_code": -32031}
+  },
+  {
+    "name": "事件流：event.subscribe 返回订阅 id",
+    "request": {"method": "event.subscribe", "params": {"event_types": ["node.status.changed"]}},
+    "expect": {"result": {"$.subscription_id": {"$type": "string"}}},
+    "save": {"sub_id": "$.subscription_id"}
+  },
+  {
+    "name": "事件流：event.unsubscribe 释放订阅",
+    "request": {"method": "event.unsubscribe", "params": {"subscription_id": "@sub_id"}},
+    "expect": {"result": {}}
+  },
+  {
+    "name": "事件流：重复取消不存在订阅返回 -32030",
+    "request": {"method": "event.unsubscribe", "params": {"subscription_id": "@sub_id"}},
+    "expect": {"error_code": -32030}
+  }
+]

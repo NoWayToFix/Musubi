@@ -1,0 +1,39 @@
+[
+  {
+    "name": "node.list 列出模拟节点",
+    "request": {"method": "node.list", "params": {}},
+    "expect": {"result": {"$.nodes.length": 3, "$.nodes[0].status": "online", "$.total": 3}}
+  },
+  {
+    "name": "node.list 按状态过滤",
+    "request": {"method": "node.list", "params": {"filter": {"status": "offline"}}},
+    "expect": {"result": {"$.nodes.length": 0}}
+  },
+  {
+    "name": "node.list 分页",
+    "request": {"method": "node.list", "params": {"limit": 2, "offset": 1}},
+    "expect": {"result": {"$.nodes.length": 2, "$.total": 3}}
+  },
+  {
+    "name": "node.get 获取节点详情",
+    "request": {"method": "node.get", "params": {"node_id": "n-1"}},
+    "expect": {
+      "result": {
+        "$.node.id": "n-1",
+        "$.node.name": "worker-1",
+        "$.node.status": "online",
+        "$.node.capabilities.length": 2
+      }
+    }
+  },
+  {
+    "name": "node.get 不存在返回 -32010",
+    "request": {"method": "node.get", "params": {"node_id": "n-999"}},
+    "expect": {"error_code": -32010}
+  },
+  {
+    "name": "node.get 未知参数被忽略",
+    "request": {"method": "node.get", "params": {"node_id": "n-1", "future_param": "ignored"}},
+    "expect": {"result": {"$.node.id": "n-1"}}
+  }
+]

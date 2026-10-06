@@ -1,0 +1,255 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hub.example/schema/methods.json",
+  "title": "Method params / results",
+  "description": "Params and results for every JSON-RPC method (PROTOCOL.md §5). Unknown params/result fields ignored by receivers.",
+  "definitions": {
+    "engine_info_params": {
+      "type": "object",
+      "properties": { "client_info": { "$ref": "capability.json#/definitions/client_info" } },
+      "additionalProperties": true
+    },
+    "engine_info_result": { "$ref": "capability.json#/definitions/server_info" },
+    "engine_ping_params": { "type": "object", "additionalProperties": true },
+    "engine_ping_result": {
+      "type": "object",
+      "required": ["pong", "time"],
+      "properties": {
+        "pong": { "const": true },
+        "time": { "$ref": "common.json#/definitions/timestamp" }
+      },
+      "additionalProperties": true
+    },
+    "engine_capabilities_result": {
+      "type": "object",
+      "required": ["capabilities", "features"],
+      "properties": {
+        "capabilities": { "type": "array", "items": { "$ref": "capability.json#/definitions/capability" } },
+        "features": { "type": "object", "additionalProperties": { "type": "boolean" } }
+      },
+      "additionalProperties": true
+    },
+    "auth_login_params": {
+      "type": "object",
+      "description": "Mode-dependent: token -> {token}; basic -> {username,password}; none -> {}.",
+      "properties": {
+        "token": { "type": "string" },
+        "username": { "type": "string" },
+        "password": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "auth_login_result": {
+      "type": "object",
+      "required": ["access_token", "token_type", "expires_in"],
+      "properties": {
+        "access_token": { "type": "string" },
+        "token_type": { "const": "bearer" },
+        "expires_in": { "type": "integer", "minimum": 0 },
+        "refresh_token": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "auth_refresh_params": {
+      "type": "object",
+      "required": ["refresh_token"],
+      "properties": { "refresh_token": { "type": "string" } },
+      "additionalProperties": true
+    },
+    "auth_logout_params": { "type": "object", "additionalProperties": true },
+    "node_list_params": {
+      "type": "object",
+      "properties": {
+        "filter": {
+          "type": "object",
+          "properties": {
+            "status": { "type": "string" },
+            "tags": { "type": "array", "items": { "type": "string" } }
+          },
+          "additionalProperties": true
+        },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 100 },
+        "offset": { "type": "integer", "minimum": 0, "default": 0 }
+      },
+      "additionalProperties": true
+    },
+    "node_list_result": {
+      "type": "object",
+      "required": ["nodes", "total"],
+      "properties": {
+        "nodes": { "type": "array", "items": { "$ref": "node.json" } },
+        "total": { "type": "integer" }
+      },
+      "additionalProperties": true
+    },
+    "node_get_params": {
+      "type": "object",
+      "required": ["node_id"],
+      "properties": { "node_id": { "type": "string" } },
+      "additionalProperties": true
+    },
+    "node_get_result": {
+      "type": "object",
+      "required": ["node"],
+      "properties": { "node": { "$ref": "node.json" } },
+      "additionalProperties": true
+    },
+    "subscribe_params": {
+      "type": "object",
+      "description": "node.subscribe / task.subscribe / event.subscribe filters. Empty event_types = subscribe to all.",
+      "properties": {
+        "node_id": { "type": "string" },
+        "task_id": { "type": "string" },
+        "event_types": { "type": "array", "items": { "type": "string" } },
+        "subscription_id": { "type": "string", "description": "For unsubscribe." }
+      },
+      "additionalProperties": true
+    },
+    "subscribe_result": {
+      "type": "object",
+      "required": ["subscription_id"],
+      "properties": { "subscription_id": { "type": "string" } },
+      "additionalProperties": true
+    },
+    "unsubscribe_result": { "type": "object", "additionalProperties": true },
+    "command_send_params": {
+      "type": "object",
+      "required": ["node_id", "method"],
+      "properties": {
+        "node_id": { "type": "string" },
+        "method": { "type": "string" },
+        "params": { "type": "object" },
+        "timeout": { "type": "integer", "minimum": 0, "default": 30000 },
+        "idempotency_key": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "command_send_result": {
+      "type": "object",
+      "required": ["command"],
+      "properties": { "command": { "$ref": "command.json" } },
+      "additionalProperties": true
+    },
+    "command_batch_params": {
+      "type": "object",
+      "required": ["commands"],
+      "properties": {
+        "commands": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["node_id", "method"],
+            "properties": {
+              "node_id": { "type": "string" },
+              "method": { "type": "string" },
+              "params": { "type": "object" },
+              "timeout": { "type": "integer", "minimum": 0 }
+            },
+            "additionalProperties": true
+          }
+        },
+        "idempotency_key": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "command_batch_result": {
+      "type": "object",
+      "required": ["commands"],
+      "properties": {
+        "commands": { "type": "array", "items": { "$ref": "command.json" } },
+        "task_id": { "type": ["string", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "command_cancel_params": {
+      "type": "object",
+      "required": ["command_id"],
+      "properties": { "command_id": { "type": "string" } },
+      "additionalProperties": true
+    },
+    "command_cancel_result": {
+      "type": "object",
+      "required": ["command"],
+      "properties": { "command": { "$ref": "command.json" } },
+      "additionalProperties": true
+    },
+    "task_create_params": {
+      "type": "object",
+      "required": ["name", "commands"],
+      "properties": {
+        "name": { "type": "string" },
+        "commands": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["node_id", "method"],
+            "properties": {
+              "node_id": { "type": "string" },
+              "method": { "type": "string" },
+              "params": { "type": "object" },
+              "timeout": { "type": "integer", "minimum": 0 }
+            },
+            "additionalProperties": true
+          }
+        },
+        "parallel": { "type": "boolean", "default": false }
+      },
+      "additionalProperties": true
+    },
+    "task_create_result": {
+      "type": "object",
+      "required": ["task"],
+      "properties": { "task": { "$ref": "task.json" } },
+      "additionalProperties": true
+    },
+    "task_get_params": {
+      "type": "object",
+      "required": ["task_id"],
+      "properties": { "task_id": { "type": "string" } },
+      "additionalProperties": true
+    },
+    "task_get_result": {
+      "type": "object",
+      "required": ["task"],
+      "properties": { "task": { "$ref": "task.json" } },
+      "additionalProperties": true
+    },
+    "task_list_params": {
+      "type": "object",
+      "properties": {
+        "filter": {
+          "type": "object",
+          "properties": { "status": { "type": "string" } },
+          "additionalProperties": true
+        },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 100 },
+        "offset": { "type": "integer", "minimum": 0, "default": 0 }
+      },
+      "additionalProperties": true
+    },
+    "task_list_result": {
+      "type": "object",
+      "required": ["tasks", "total"],
+      "properties": {
+        "tasks": { "type": "array", "items": { "$ref": "task.json" } },
+        "total": { "type": "integer" }
+      },
+      "additionalProperties": true
+    },
+    "task_cancel_params": {
+      "type": "object",
+      "required": ["task_id"],
+      "properties": { "task_id": { "type": "string" } },
+      "additionalProperties": true
+    },
+    "task_cancel_result": {
+      "type": "object",
+      "required": ["task"],
+      "properties": { "task": { "$ref": "task.json" } },
+      "additionalProperties": true
+    },
+    "event_subscribe_params": { "$ref": "#/definitions/subscribe_params" },
+    "event_unsubscribe_params": { "$ref": "#/definitions/subscribe_params" }
+  }
+}

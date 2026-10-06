@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hub.example/schema/node.json",
+  "title": "Node model",
+  "description": "A controlled node. Unknown fields (e.g. from newer clients) MUST be preserved and ignored by consumers.",
+  "type": "object",
+  "required": ["id", "name", "status"],
+  "properties": {
+    "id": { "type": "string", "examples": ["n-1"] },
+    "name": { "type": "string", "examples": ["worker-1"] },
+    "status": { "type": "string", "enum": ["online", "busy", "offline", "unknown"] },
+    "capabilities": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Node capabilities, e.g. shell.exec. Opaque to the engine; new values tolerated."
+    },
+    "tags": { "type": "array", "items": { "type": "string" } },
+    "metadata": {
+      "type": "object",
+      "description": "Free-form key/value metadata, reported by the node. Opaque to the engine.",
+      "additionalProperties": true
+    },
+    "last_seen": { "$ref": "common.json#/definitions/timestamp" },
+    "registered_at": { "$ref": "common.json#/definitions/timestamp" }
+  },
+  "additionalProperties": true
+}
