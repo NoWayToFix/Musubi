@@ -31,12 +31,14 @@ const heartbeatInterval = 5 * time.Second
 
 // Config configures a Hub.
 type Config struct {
-	AuthMode  string // none | token | basic
-	Token     string // static token for token mode
-	User      string // username for basic mode
-	Pass      string // password for basic mode
-	DemoNodes int    // number of simulated nodes n-1..n-N (default 3)
-	Logger    *slog.Logger
+	AuthMode   string // none | token | basic
+	Token      string // static token for token mode
+	User       string // username for basic mode
+	Pass       string // password for basic mode
+	DemoNodes  int    // number of simulated nodes n-1..n-N (default 3)
+	Logger     *slog.Logger
+	AllowShell bool   // allow shell method execution on demo nodes
+	AllowOrigin []string // allowed WS origins; if empty, allow absent origin, check present against Host/scheme
 }
 
 // CallCtx carries per-call state into method handlers: the resolved auth
