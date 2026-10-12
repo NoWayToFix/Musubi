@@ -250,6 +250,93 @@
       "additionalProperties": true
     },
     "event_subscribe_params": { "$ref": "#/definitions/subscribe_params" },
-    "event_unsubscribe_params": { "$ref": "#/definitions/subscribe_params" }
+    "event_unsubscribe_params": { "$ref": "#/definitions/subscribe_params" },
+    "seat_list_params": {
+      "type": "object",
+      "properties": {
+        "filter": {
+          "type": "object",
+          "properties": {
+            "kind": { "type": "string", "enum": ["standing", "vacant"] },
+            "node_id": { "type": "string" }
+          },
+          "additionalProperties": true
+        },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 100 },
+        "offset": { "type": "integer", "minimum": 0, "default": 0 }
+      },
+      "additionalProperties": true
+    },
+    "seat_list_result": {
+      "type": "object",
+      "required": ["seats", "total"],
+      "properties": {
+        "seats": { "type": "array", "items": { "$ref": "seat.json" } },
+        "total": { "type": "integer" }
+      },
+      "additionalProperties": true
+    },
+    "seat_create_params": {
+      "type": "object",
+      "description": "Creates a vacant seat. bind_policy defaults to manual; expect is optional.",
+      "properties": {
+        "name": { "type": "string" },
+        "bind_policy": { "type": "string", "enum": ["auto", "manual"], "default": "manual" },
+        "expect": { "$ref": "seat.json#/properties/expect" }
+      },
+      "additionalProperties": true
+    },
+    "seat_create_result": {
+      "type": "object",
+      "required": ["seat"],
+      "properties": { "seat": { "$ref": "seat.json" } },
+      "additionalProperties": true
+    },
+    "seat_get_params": {
+      "type": "object",
+      "required": ["seat_id"],
+      "properties": { "seat_id": { "type": "string" } },
+      "additionalProperties": true
+    },
+    "seat_get_result": {
+      "type": "object",
+      "required": ["seat"],
+      "properties": { "seat": { "$ref": "seat.json" } },
+      "additionalProperties": true
+    },
+    "seat_delete_params": {
+      "type": "object",
+      "required": ["seat_id"],
+      "properties": { "seat_id": { "type": "string" } },
+      "additionalProperties": true
+    },
+    "seat_delete_result": { "type": "object", "additionalProperties": true },
+    "seat_bind_params": {
+      "type": "object",
+      "required": ["seat_id", "node_id"],
+      "properties": {
+        "seat_id": { "type": "string" },
+        "node_id": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "seat_bind_result": {
+      "type": "object",
+      "required": ["seat"],
+      "properties": { "seat": { "$ref": "seat.json" } },
+      "additionalProperties": true
+    },
+    "seat_unbind_params": {
+      "type": "object",
+      "required": ["seat_id"],
+      "properties": { "seat_id": { "type": "string" } },
+      "additionalProperties": true
+    },
+    "seat_unbind_result": {
+      "type": "object",
+      "required": ["seat"],
+      "properties": { "seat": { "$ref": "seat.json" } },
+      "additionalProperties": true
+    }
   }
 }

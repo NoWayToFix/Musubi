@@ -1,4 +1,4 @@
-module musubi/tests/smoke_go
+module musubi/tests/detonate_go
 
 go 1.20
 

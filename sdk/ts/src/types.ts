@@ -65,6 +65,60 @@ export interface Node {
   metadata?: Record<string, unknown>;
   last_seen?: Timestamp;
   registered_at?: Timestamp;
+  seat_id?: string;
+  [key: string]: unknown;
+}
+
+/** Expected profile a filling node must match (PROTOCOL.md §4.7). */
+export interface SeatExpect {
+  capabilities?: string[];
+  tags?: string[];
+  metadata?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+/** A reservable position in the engine (PROTOCOL.md §4.7): the extensibility unit. */
+export interface Seat {
+  id?: string;
+  kind?: 'standing' | 'vacant';
+  name?: string;
+  bind_policy?: 'auto' | 'manual';
+  expect?: SeatExpect;
+  node_id?: string | null;
+  created_at?: Timestamp;
+  filled_at?: Timestamp | null;
+  released_at?: Timestamp | null;
+  [key: string]: unknown;
+}
+
+export interface SeatCreateParams {
+  name?: string;
+  bind_policy?: 'auto' | 'manual';
+  expect?: SeatExpect;
+  [key: string]: unknown;
+}
+
+export interface SeatResult {
+  seat?: Seat;
+  [key: string]: unknown;
+}
+
+export interface SeatFilter {
+  kind?: 'standing' | 'vacant';
+  node_id?: string;
+  [key: string]: unknown;
+}
+
+export interface SeatListParams {
+  filter?: SeatFilter;
+  limit?: number;
+  offset?: number;
+  [key: string]: unknown;
+}
+
+export interface SeatListResult {
+  seats?: Seat[];
+  total?: number;
   [key: string]: unknown;
 }
 
@@ -422,17 +476,14 @@ export interface RequestOptions {
   batch?: boolean;
 }
 
-/** A queued write operation held while offline. */
+/**
+ * A queued write operation held while offline. Mirrors the HubClient-internal
+ * QueuedRequest (client.ts); kept for typing public helpers only.
+ */
 export interface QueuedRequest {
   method: string;
   params: Record<string, unknown> | undefined;
   resolve: (value: unknown) => void;
   reject: (err: unknown) => void;
   timeoutMs: number;
-}
-
-/** A single event subscription handle returned by subscribeEvents(). */
-export interface Subscription {
-  readonly subscription_id: string;
-  unsubscribe(): Promise<void>;
 }

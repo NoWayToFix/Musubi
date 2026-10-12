@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 
@@ -196,9 +197,18 @@ func parseSpecs(args []string) ([]sdk.CommandSpec, error) {
 				return nil, fmt.Errorf("无法解析 %q，应为 <node_id>:<method>", item)
 			}
 			spec := sdk.CommandSpec{NodeID: node, Method: method, Params: map[string]any{}}
-			// Optional third field: "n-1:sleep:500".
+			// Optional third field: "n-1:sleep:500". The ms value is parsed
+			// here because the hub's intParam only accepts numbers — passing
+			// the raw string would silently sleep 0ms.
 			if extra := strings.Split(method, ":"); len(extra) == 2 {
-				spec.Method, spec.Params = extra[0], map[string]any{"ms": extra[1]}
+				if extra[0] != "sleep" {
+					return nil, fmt.Errorf("无法解析 %q，三段式 <node_id>:<method>:<ms> 仅支持 sleep", item)
+				}
+				ms, err := strconv.Atoi(extra[1])
+				if err != nil {
+					return nil, fmt.Errorf("无法解析 %q，sleep 时长 %q 不是整数毫秒", item, extra[1])
+				}
+				spec.Method, spec.Params = extra[0], map[string]any{"ms": ms}
 			}
 			out = append(out, spec)
 		}

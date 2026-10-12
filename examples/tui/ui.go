@@ -170,7 +170,7 @@ func (a *app) paneLines(w, h, active int, nodes []sdk.Node, cmds []sdk.Command,
 		default:
 			title, rows = "EVENTS", a.eventRows(events, sel[paneEvents], scroll[paneEvents], w-4)
 		}
-		return a.box(title, w, rows, h, true)
+		return a.box(title, w, rows, h, sel[active], scroll[active], true)
 	}
 
 	// 3-column layout: nodes | commands | events, with tasks under nodes.
@@ -181,10 +181,10 @@ func (a *app) paneLines(w, h, active int, nodes []sdk.Node, cmds []sdk.Command,
 	leftH := h / 2
 	rightH := h - leftH
 
-	leftTop := a.box("NODES", colW, a.nodeRows(nodes, sel[paneNodes], scroll[paneNodes], colW-4), leftH, active == paneNodes)
-	leftBot := a.box("TASKS", colW, a.taskRows(tasks, sel[paneTasks], scroll[paneTasks], colW-4), rightH, active == paneTasks)
-	mid := a.box("COMMANDS", colW, a.commandRows(cmds, sel[paneCmds], scroll[paneCmds], colW-4), h, active == paneCmds)
-	right := a.box("EVENTS", colW, a.eventRows(events, sel[paneEvents], scroll[paneEvents], colW-4), h, active == paneEvents)
+	leftTop := a.box("NODES", colW, a.nodeRows(nodes, sel[paneNodes], scroll[paneNodes], colW-4), leftH, sel[paneNodes], scroll[paneNodes], active == paneNodes)
+	leftBot := a.box("TASKS", colW, a.taskRows(tasks, sel[paneTasks], scroll[paneTasks], colW-4), rightH, sel[paneTasks], scroll[paneTasks], active == paneTasks)
+	mid := a.box("COMMANDS", colW, a.commandRows(cmds, sel[paneCmds], scroll[paneCmds], colW-4), h, sel[paneCmds], scroll[paneCmds], active == paneCmds)
+	right := a.box("EVENTS", colW, a.eventRows(events, sel[paneEvents], scroll[paneEvents], colW-4), h, sel[paneEvents], scroll[paneEvents], active == paneEvents)
 
 	var out []string
 	for i := 0; i < h; i++ {
@@ -198,13 +198,16 @@ func (a *app) paneLines(w, h, active int, nodes []sdk.Node, cmds []sdk.Command,
 }
 
 // box wraps rows in a titled frame of the given size, padding with blanks.
-func (a *app) box(title string, w int, rows []string, h int, focused bool) []string {
+// Only the visible window of rows is rendered (h-2 body lines), positioned so
+// the highlighted row (scroll+sel) always stays on screen.
+func (a *app) box(title string, w int, rows []string, h, sel, scroll int, focused bool) []string {
 	border := a.colorize(cDim, "│")
 	head := " " + title
 	if focused {
 		head = a.colorize(cBold+cWhite, "▌"+title)
 	}
 	out := []string{a.boxTop(w, head, focused)}
+	rows = visibleRows(rows, sel, scroll, h-2)
 	for i := 0; i < h-2; i++ {
 		row := ""
 		if i < len(rows) {
@@ -372,6 +375,41 @@ func (a *app) eventRows(events []sdk.HubEvent, sel, scroll, w int) []string {
 		out = append(out, highlight(a, i, scroll, sel, row))
 	}
 	return out
+}
+
+// visibleRows windows the full row list down to the inner body of a pane.
+// scroll is the absolute index of the first visible row and sel the cursor
+// offset inside that window; both are re-clamped here because lists can
+// shrink (or the state-side height estimate can drift) between key presses,
+// and the highlighted row scroll+sel must always stay on screen.
+func visibleRows(rows []string, sel, scroll, inner int) []string {
+	if inner < 1 {
+		inner = 1
+	}
+	if len(rows) == 0 {
+		return rows
+	}
+	abs := scroll + sel
+	if abs > len(rows)-1 {
+		abs = len(rows) - 1
+	}
+	if abs < 0 {
+		abs = 0
+	}
+	top := abs - sel // keep the cursor at its offset inside the window
+	if sel >= inner || top < 0 {
+		top = abs - inner + 1 // pin the cursor to the last visible row
+	}
+	if top > len(rows)-inner {
+		top = len(rows) - inner
+	}
+	if top < 0 {
+		top = 0
+	}
+	if end := top + inner; end < len(rows) {
+		return rows[top:end]
+	}
+	return rows[top:]
 }
 
 // highlight renders the selection cursor for the visible row index i.

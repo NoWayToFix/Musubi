@@ -51,7 +51,10 @@ var HUB_CODES = {
   SUBSCRIPTION_NOT_FOUND: -32030,
   EVENT_TYPE_NOT_SUPPORTED: -32031,
   FEATURE_DISABLED: -32040,
-  RATE_LIMITED: -32041
+  RATE_LIMITED: -32041,
+  SEAT_NOT_FOUND: -32050,
+  SEAT_OCCUPIED: -32051,
+  SEAT_EXPECT_MISMATCH: -32052
 };
 var SDK_CODES = {
   /** Request timed out locally. */
@@ -814,7 +817,9 @@ var HubClient = class {
       queueOffline: options.queueOffline ?? true,
       requestTimeoutMs: options.requestTimeoutMs ?? 3e4,
       pingIntervalMs: options.pingIntervalMs ?? 3e4,
-      dedupeWindow: options.dedupeWindow ?? 5e3,
+      // Clamp to >= 0: a negative window previously drove dedupeEvent into a
+      // non-terminating loop. Non-finite values fall back to the default.
+      dedupeWindow: typeof options.dedupeWindow === "number" && Number.isFinite(options.dedupeWindow) ? Math.max(0, Math.floor(options.dedupeWindow)) : 5e3,
       batch: options.batch ?? false,
       proxy: options.proxy,
       ca: options.ca,
@@ -1134,27 +1139,37 @@ var HubClient = class {
         return await this.sendOnce(method, params, opts);
       } catch (err) {
         const isAuth = err instanceof HubError && (err.code === HUB_CODES.AUTH_EXPIRED || err.code === HUB_CODES.AUTH_INVALID);
-        if (isAuth && attempts === 0) {
+        if (isAuth && attempts === 0 && !method.startsWith("auth.")) {
           attempts += 1;
-          const tokenBefore = this.accessToken;
-          if (err instanceof HubError && err.code === HUB_CODES.AUTH_EXPIRED && this.refreshToken) {
-            try {
-              await this.refresh();
-            } catch {
-            }
-          }
-          if (!this.accessToken && this.opts.credentials) {
-            try {
-              await this.login(this.opts.credentials);
-            } catch {
-            }
-          }
-          if (this.accessToken && this.accessToken !== tokenBefore) continue;
-          throw err;
+          if (await this.recoverAuth()) continue;
         }
         throw err;
       }
     }
+  }
+  /**
+   * Recover from an auth failure: refresh the token pair first (the engine
+   * rotates BOTH access_token and refresh_token and invalidates the old pair,
+   * so refresh() stores the new pair), then fall back to a full re-login with
+   * the configured credentials. Returns true when a fresh token is available
+   * for retrying the original request exactly once.
+   */
+  async recoverAuth() {
+    if (this.refreshToken) {
+      try {
+        await this.refresh();
+        return true;
+      } catch {
+      }
+    }
+    if (this.opts.credentials) {
+      try {
+        await this.login(this.opts.credentials);
+        return true;
+      } catch {
+      }
+    }
+    return false;
   }
   async sendOnce(method, params, opts) {
     const t = this.transport;
@@ -1189,6 +1204,11 @@ var HubClient = class {
   }
   dispatchEvent(ev) {
     if (!this.dedupeEvent(ev.id)) return;
+    const kind = this.transport?.kind;
+    if ((kind === "http" || kind === "poll") && this.activeSubs.length > 0) {
+      const matched = this.activeSubs.some((s) => !s.cancelled && eventMatchesFilters(s.filters, ev));
+      if (!matched) return;
+    }
     const type = ev.type ?? "";
     const handlers = this.listeners.get(type);
     if (handlers) {
@@ -1214,7 +1234,7 @@ var HubClient = class {
     if (this.seenSet.has(id)) return false;
     this.seenSet.add(id);
     this.seenIds.push(id);
-    const window = this.opts.dedupeWindow;
+    const window = Math.max(0, this.opts.dedupeWindow);
     while (this.seenIds.length > window) {
       const old = this.seenIds.shift();
       if (old !== void 0) this.seenSet.delete(old);
@@ -1230,60 +1250,94 @@ var HubClient = class {
    * re-established automatically after reconnects.
    */
   async subscribeEvents(filters) {
-    const key = JSON.stringify(filters ?? {});
-    const res = await this.eventSubscribe(filters ?? {});
-    const subscriptionId = res.subscription_id ?? "";
-    const sub = {
-      subscription_id: subscriptionId,
+    const filtersValue = filters ?? {};
+    const entry = { filters: filtersValue, pending: true, cancelled: false };
+    this.activeSubs.push(entry);
+    try {
+      const res = await this.eventSubscribe(filtersValue);
+      entry.pending = false;
+      entry.serverId = res.subscription_id ?? "";
+    } catch (err) {
+      this.removeActiveSub(entry);
+      throw err;
+    }
+    if (entry.cancelled && entry.serverId) {
+      void this.eventUnsubscribe(entry.serverId).catch(() => {
+      });
+    }
+    return {
+      get subscription_id() {
+        return entry.serverId ?? "";
+      },
       unsubscribe: async () => {
-        const idx = this.activeSubs.findIndex((s) => s.key === key);
-        if (idx !== -1) this.activeSubs.splice(idx, 1);
-        if (subscriptionId) {
-          await this.eventUnsubscribe(subscriptionId).catch(() => {
+        if (entry.cancelled) return;
+        entry.cancelled = true;
+        this.removeActiveSub(entry);
+        if (entry.serverId) {
+          await this.eventUnsubscribe(entry.serverId).catch(() => {
           });
         }
       }
     };
-    this.activeSubs.push({ key, filters: filters ?? {}, serverId: subscriptionId });
-    return sub;
   }
   /** Convenience: subscribe to node events; returns an unsubscribe function. */
   onNode(nodeId) {
-    const key = JSON.stringify({ scope: "node", node_id: nodeId });
-    void this.subscribeEvents({ node_id: nodeId }).catch(() => {
-    });
-    return () => {
-      const idx = this.activeSubs.findIndex((s) => s.key === key);
-      if (idx !== -1) {
-        const [sub] = this.activeSubs.splice(idx, 1);
-        if (sub.serverId) {
-          void this.eventUnsubscribe(sub.serverId).catch(() => {
-          });
-        }
-      }
-    };
+    return this.trackSubscription({ node_id: nodeId });
   }
   /** Convenience: subscribe to task events; returns an unsubscribe function. */
   onTask(taskId) {
-    const key = JSON.stringify({ scope: "task", task_id: taskId });
-    void this.subscribeEvents({ task_id: taskId }).catch(() => {
-    });
-    return () => {
-      const idx = this.activeSubs.findIndex((s) => s.key === key);
-      if (idx !== -1) {
-        const [sub] = this.activeSubs.splice(idx, 1);
-        if (sub.serverId) {
-          void this.eventUnsubscribe(sub.serverId).catch(() => {
-          });
+    return this.trackSubscription({ task_id: taskId });
+  }
+  /**
+   * Shared helper behind onNode/onTask: subscribes (possibly while offline —
+   * the request is queued and replayed on reconnect) and returns a
+   * synchronous unsubscribe function that is safe to call before the
+   * subscribe call has resolved.
+   */
+  trackSubscription(filters) {
+    let sub = null;
+    let cancelled = false;
+    const subscribe = () => {
+      void this.subscribeEvents(filters).then((s) => {
+        if (cancelled) {
+          void s.unsubscribe();
+        } else {
+          sub = s;
         }
+      }).catch(() => {
+      });
+    };
+    if (this.state === "new") {
+      void this.open().then(subscribe, () => {
+      });
+    } else {
+      subscribe();
+    }
+    return () => {
+      cancelled = true;
+      if (sub) {
+        void sub.unsubscribe().catch(() => {
+        });
       }
     };
   }
+  removeActiveSub(entry) {
+    const idx = this.activeSubs.indexOf(entry);
+    if (idx !== -1) this.activeSubs.splice(idx, 1);
+  }
   async restoreSubscriptions() {
-    for (const sub of this.activeSubs) {
+    for (const sub of [...this.activeSubs]) {
+      if (sub.cancelled || sub.pending) continue;
       try {
         const res = await this.eventSubscribe(sub.filters);
-        sub.serverId = res.subscription_id;
+        if (sub.cancelled) {
+          if (res.subscription_id) {
+            void this.eventUnsubscribe(res.subscription_id).catch(() => {
+            });
+          }
+          continue;
+        }
+        sub.serverId = res.subscription_id ?? "";
       } catch {
       }
     }
@@ -1310,11 +1364,20 @@ var HubClient = class {
   refresh() {
     const rt = this.refreshToken;
     if (!rt) return Promise.reject(new HubError(SDK_CODES.AUTH_UNAVAILABLE, "no refresh_token available"));
-    return this.request("auth.refresh", { refresh_token: rt }, { noQueue: true }).then((res) => {
-      if (res?.access_token) this.accessToken = res.access_token;
-      if (res?.refresh_token) this.refreshToken = res.refresh_token;
-      return res;
-    });
+    return this.request("auth.refresh", { refresh_token: rt }, { noQueue: true }).then(
+      (res) => {
+        if (res?.access_token) this.accessToken = res.access_token;
+        if (res?.refresh_token) this.refreshToken = res.refresh_token;
+        return res;
+      },
+      (err) => {
+        if (err instanceof HubError && (err.code === HUB_CODES.AUTH_EXPIRED || err.code === HUB_CODES.AUTH_INVALID)) {
+          this.refreshToken = void 0;
+          this.accessToken = void 0;
+        }
+        throw err;
+      }
+    );
   }
   logout() {
     return this.request("auth.logout", {}, { noQueue: true }).then((res) => {
@@ -1390,7 +1453,37 @@ var HubClient = class {
     const params = { subscription_id: subscriptionId };
     return this.request("event.unsubscribe", params);
   }
+  seatList(filter, limit, offset) {
+    const params = {};
+    if (filter) params["filter"] = filter;
+    if (limit !== void 0) params["limit"] = limit;
+    if (offset !== void 0) params["offset"] = offset;
+    return this.request("seat.list", params);
+  }
+  seatCreate(spec = {}) {
+    return this.request("seat.create", spec);
+  }
+  seatGet(seatId) {
+    return this.request("seat.get", { seat_id: seatId });
+  }
+  seatDelete(seatId) {
+    return this.request("seat.delete", { seat_id: seatId });
+  }
+  seatBind(seatId, nodeId) {
+    return this.request("seat.bind", { seat_id: seatId, node_id: nodeId });
+  }
+  seatUnbind(seatId) {
+    return this.request("seat.unbind", { seat_id: seatId });
+  }
 };
+function eventMatchesFilters(filters, ev) {
+  if (filters.event_types && filters.event_types.length > 0) {
+    if (!ev.type || !filters.event_types.includes(ev.type)) return false;
+  }
+  if (filters.node_id && ev.node_id !== filters.node_id) return false;
+  if (filters.task_id && ev.task_id !== filters.task_id) return false;
+  return true;
+}
 function detectPlatform() {
   const g = globalThis;
   let runtime = "unknown";

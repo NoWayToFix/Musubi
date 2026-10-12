@@ -30,6 +30,10 @@ var knownEventTypes = map[string]bool{
 	"task.completed":      true,
 	"task.failed":         true,
 	"task.cancelled":      true,
+	"seat.created":        true,
+	"seat.filled":         true,
+	"seat.released":       true,
+	"seat.deleted":        true,
 }
 
 const (
@@ -61,6 +65,9 @@ type Subscription struct {
 	EventTypes map[string]bool // non-empty = allow-list (intersection)
 	NodeID     string          // filter: only events for this node
 	TaskID     string          // filter: only events for this task
+	// Owner is the identity of the creator (see callerOwner); empty for
+	// anonymous-created subscriptions, which anyone may unsubscribe.
+	Owner string
 
 	ch   chan *Event
 	done chan struct{}
@@ -122,12 +129,13 @@ func newEventBus(log *slog.Logger) *eventBus {
 }
 
 // newSub registers a subscription with id and filters.
-func (b *eventBus) newSub(id string, eventTypes []string, nodeID, taskID string) *Subscription {
+func (b *eventBus) newSub(id string, eventTypes []string, nodeID, taskID, owner string) *Subscription {
 	sub := &Subscription{
 		ID:         id,
 		EventTypes: map[string]bool{},
 		NodeID:     nodeID,
 		TaskID:     taskID,
+		Owner:      owner,
 		ch:         make(chan *Event, eventSubBuf),
 		done:       make(chan struct{}),
 	}
@@ -264,7 +272,9 @@ func (b *eventBus) poll(ctx context.Context, cursor int64, timeout time.Duration
 // Hub-level event helpers (used by nodes/commands/tasks and transports)
 
 func (h *Hub) NewEventSub(eventTypes []string, nodeID, taskID string) *Subscription {
-	return h.events.newSub(h.newSubID(), eventTypes, nodeID, taskID)
+	// Transport-created subscriptions (SSE streams) have no RPC caller and
+	// keep an empty owner: anyone may close them, as before.
+	return h.events.newSub(h.newSubID(), eventTypes, nodeID, taskID, "")
 }
 
 func (h *Hub) CloseEventSub(sub *Subscription) {
@@ -366,14 +376,23 @@ func (h *Hub) publishTaskTerminal(t *Task) {
 // event.* RPC handlers
 
 // eventSubscribe subscribes with an optional filter: event_types, node_id
-// and task_id intersect. Empty event_types = all events (§5).
+// and task_id intersect. Empty event_types = all events (§5). A present but
+// malformed event_types (non-array, or containing non-strings) is rejected
+// with -32602: dropping entries silently would widen the filter to all
+// events.
 func (h *Hub) eventSubscribe(cc *CallCtx, p map[string]any) (any, *jsonrpc.Error) {
 	var types []string
-	if raw, ok := p["event_types"].([]any); ok {
+	if v, ok := p["event_types"]; ok && v != nil {
+		raw, ok := v.([]any)
+		if !ok {
+			return nil, jsonrpc.ErrInvalidParams("event_types must be an array of strings")
+		}
 		for _, t := range raw {
-			if s, ok := t.(string); ok {
-				types = append(types, s)
+			s, ok := t.(string)
+			if !ok {
+				return nil, jsonrpc.ErrInvalidParams("event_types must be an array of strings")
 			}
+			types = append(types, s)
 		}
 	}
 	return h.makeSubscription(cc, types, strParam(p["node_id"]), strParam(p["task_id"]))
@@ -384,9 +403,14 @@ func (h *Hub) eventUnsubscribe(cc *CallCtx, p map[string]any) (any, *jsonrpc.Err
 	if id == "" {
 		return nil, jsonrpc.ErrInvalidParams("subscription_id required")
 	}
-	if !h.events.closeSub(id) {
+	sub := h.events.getSub(id)
+	if sub == nil {
 		return nil, jsonrpc.NewError(jsonrpc.CodeSubNotFound, "subscription.not_found",
 			map[string]any{"subscription_id": id})
 	}
+	if !mayActOn(cc, sub.Owner) {
+		return nil, errForbidden("subscription")
+	}
+	h.events.closeSub(id)
 	return map[string]any{}, nil
 }

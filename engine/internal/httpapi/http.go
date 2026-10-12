@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -50,8 +51,13 @@ func (a *API) handleRPC(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if !a.originAllowed(r) {
+		http.Error(w, "origin not allowed", http.StatusForbidden)
+		return
+	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, 4<<20))
 	if err != nil {
+		a.log.Warn("rpc body read failed", "error", err)
 		http.Error(w, "read error", http.StatusBadRequest)
 		return
 	}
@@ -153,7 +159,12 @@ func (a *API) handlePoll(w http.ResponseWriter, r *http.Request) {
 	if timeout > 60 {
 		timeout = 60
 	}
-	ncursor, events, _ := a.hub.PollEvents(r.Context(), cursor, time.Duration(timeout)*time.Second)
+	ncursor, events, perr := a.hub.PollEvents(r.Context(), cursor, time.Duration(timeout)*time.Second)
+	if perr != nil && r.Context().Err() == nil {
+		// A non-cancellation error would otherwise be indistinguishable from a
+		// clean empty poll.
+		a.log.Warn("poll failed", "error", perr)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"cursor": ncursor, "events": events})
 }
 
@@ -173,6 +184,10 @@ func (a *API) handleRegister(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if !a.originAllowed(r) {
+		http.Error(w, "origin not allowed", http.StatusForbidden)
+		return
+	}
 	if _, aerr := a.hub.ResolveHeaderAuth(r.Header.Get("Authorization")); aerr != nil {
 		writeJSON(w, http.StatusUnauthorized, jsonrpc.ErrorResponse(nil, aerr))
 		return
@@ -182,7 +197,11 @@ func (a *API) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, jsonrpc.ErrorResponse(nil, jsonrpc.ErrParse()))
 		return
 	}
-	n := a.hub.RegisterNode(reg)
+	n, nerr := a.hub.RegisterNode(reg)
+	if nerr != nil {
+		writeJSON(w, http.StatusBadRequest, jsonrpc.ErrorResponse(nil, nerr))
+		return
+	}
 	writeJSON(w, http.StatusOK, n)
 }
 
@@ -194,6 +213,10 @@ func (a *API) handleWS(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if !a.originAllowed(r) {
+		http.Error(w, "origin not allowed", http.StatusForbidden)
+		return
+	}
 	conn, err := ws.Upgrade(w, r)
 	if err != nil {
 		return // Upgrade already wrote the error response
@@ -201,7 +224,15 @@ func (a *API) handleWS(w http.ResponseWriter, r *http.Request) {
 	defer conn.Close()
 
 	authHeader := r.Header.Get("Authorization")
+	// Subscriptions created on this connection are closed on EVERY exit path,
+	// including write failures, binary frames and the close handshake, which
+	// bypassed the old post-loop cleanup and leaked subscriptions.
 	var subs []string
+	defer func() {
+		for _, id := range subs {
+			a.hub.CloseEventSubByID(id)
+		}
+	}()
 	conn.KeepAlive(30*time.Second, 10*time.Second)
 
 	for {
@@ -241,10 +272,6 @@ func (a *API) handleWS(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// Clean up subscriptions created on this connection.
-	for _, id := range subs {
-		a.hub.CloseEventSubByID(id)
-	}
 }
 
 // pumpWSSub streams one subscription's events to a WebSocket connection as
@@ -277,6 +304,33 @@ func pumpWSSub(conn *ws.Conn, sub *hub.Subscription) {
 			return
 		}
 	}
+}
+
+// originAllowed reports whether a state-changing endpoint may serve a request
+// from this Origin. Browsers do not apply CORS to WebSockets and a no-cors form
+// post can still reach /v1/rpc, so without this check any page a user visits
+// could drive the hub. Absent Origin means a non-browser client (Go/TS/Python
+// SDKs, TUI, curl) and is allowed; a present Origin must be same-origin or
+// explicitly allowed via -allow-origin. "null" (file:// pages, sandboxed
+// iframes) is never same-origin, so it is rejected unless allow-listed.
+func (a *API) originAllowed(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	for _, allowed := range a.hub.AllowedOrigins() {
+		if allowed == "*" || strings.EqualFold(strings.TrimSpace(allowed), origin) {
+			return true
+		}
+	}
+	if origin == "null" {
+		return false
+	}
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	return strings.EqualFold(u.Host, r.Host)
 }
 
 // authFromRequest resolves ?token= or Authorization: Bearer for SSE/poll.

@@ -1,6 +1,6 @@
 # Musubi Control Hub — 极致兼容的跨语言集控接口
 
-轻量、可复用、跨语言、**极致兼容**的集控系统：**Go 单二进制引擎** + 语言无关的 **JSON-RPC 2.0 契约** + 三套完整 SDK（Go / TypeScript / Python）+ **Electron 接入示例**。
+轻量、可复用、跨语言、**极致兼容**的集控系统：**Go 单二进制引擎** + 语言无关的 **JSON-RPC 2.0 契约** + 三套 SDK（Go / TypeScript / Python，全部协议方法均可调用；离线队列与 token 轮换三端行为一致）+ **Electron 接入示例**。
 
 > 核心思想：**任何语言、任何运行时、任何传输、任何平台，只要能发 JSON 就能接入。**
 > 契约唯一锚点：[docs/PROTOCOL.md](docs/PROTOCOL.md) ｜ 支持矩阵：[docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)
@@ -20,7 +20,7 @@ sdk/python/            Python SDK（3.8+，默认零依赖）
 schema/                JSON Schema 契约（信封/模型/方法/能力/错误码）
 examples/electron/     Electron 主进程 + preload + 渲染进程接入示例
 examples/tui/          终端 TUI demo（Go 单文件、零依赖、事件驱动）+ 无头脚本入口
-tests/                 契约测试 + 多语言一致性冒烟 + 兼容性矩阵冒烟
+tests/                 契约测试 + 多语言一致性起爆 + 兼容性矩阵起爆
 docs/                  PROTOCOL 规范 + 兼容性矩阵
 ```
 
@@ -31,7 +31,8 @@ docs/                  PROTOCOL 规范 + 兼容性矩阵
 ```bash
 export PATH="$PATH:/usr/local/go/bin"
 cd engine && CGO_ENABLED=0 go build -o hubd ./cmd/hubd   # 单二进制，< 10MB
-./hubd -addr :8080 -demo 3                              # 3 个模拟节点（echo/fail/sleep/shell）
+./hubd -addr :8080 -demo 3                              # 3 个模拟节点（echo/fail/sleep）
+./hubd -addr :8080 -demo 3 -allow-shell                 # 额外启用 shell（会以本进程用户执行主机命令）
 ./hubd -addr :8080 -auth token -token secret-token      # token 认证
 ```
 
@@ -66,7 +67,8 @@ const hub = new HubClient({ url: "http://127.0.0.1:8080" });
 await hub.open();
 const nodes = await hub.nodeList();
 const cmd = await hub.commandSend({ node_id: "n-1", method: "echo", params: { text: "hi" } });
-hub.on("event", (ev) => console.log(ev.type, ev));
+hub.on("node.updated", (ev) => console.log(ev.data));  // 按事件类型分发
+hub.on("*", (ev) => console.log(ev.type, ev));         // 全量（含未知类型）；无 "event" 这个 type
 ```
 
 ```python
@@ -113,7 +115,7 @@ cd examples/tui && GOFLAGS=-mod=mod CGO_ENABLED=0 go build -o hubtui .
 ### 6. 测试
 
 ```bash
-bash tests/run_all.sh           # 契约测试(none+token 两轮) + schema + 三语言一致性冒烟 + 矩阵冒烟
+bash tests/run_all.sh           # 契约测试(none+token 两轮) + schema + 三语言一致性起爆 + 矩阵起爆
 ```
 
 ## 极致兼容性一览
@@ -132,15 +134,22 @@ bash tests/run_all.sh           # 契约测试(none+token 两轮) + schema + 三
 
 ## 测试覆盖
 
-- `tests/contract/cases/*.json` — 语言无关契约用例（7 组：engine/auth/nodes/commands/tasks/events/batch）
+- `tests/contract/cases/*.json` — 语言无关契约用例（8 组：engine/auth/nodes/commands/tasks/events/batch/seats）
 - `tests/run_contract.py` — 契约运行器（JSON 路径断言、`mode` 门控、batch 单项错误、事件驱动终态）
-- `tests/compat/smoke_{py,ts,go}` — 三语言**同一 10 步断言序列**的一致性冒烟
-- `tests/compat/matrix_smoke.sh` — 兼容性铁律冒烟（未知字段忽略、版本不匹配、SSE、批处理、断线重连）
+- `tests/compat/detonate_{py,ts,go}` — 三语言**核心场景等价覆盖**的一致性起爆（各语言实现细节略有差异）
+- `tests/compat/matrix_detonate.sh` — 兼容性铁律起爆（未知字段忽略、版本不匹配、SSE、批处理、断线重连）
 - `tests/schema_validate.py` — 引擎响应/事件对 `schema/*.json` 的结构校验
 - `examples/tui --script` — TUI demo 无头脚本回归（COMMANDS/EVENTS 面板断言）
 
-完整结果（`bash tests/run_all.sh`）：契约 **none 48/48 + token 48/48**、Schema 全过、
-Python **26/26**、TypeScript **14/14**、Go **26/26**、矩阵冒烟全过。
+完整结果（`bash tests/run_all.sh`）：契约 **none 56/56 + token 62/62**（none 模式跳过 6 个 token 专属用例）、
+Schema 全过、Python **28/28**、TypeScript **15/15**、Go **26/26**、矩阵起爆全过。
+
+## 席位（Seat）— 可拓展性的代名词
+
+引擎的一切扩展点以「席位」接入（PROTOCOL.md §4.7）：**常席**（standing）已被实体占用，**虚席**（vacant）
+预留待补。虚席可声明期望画像（`expect`），`auto` 策略下匹配节点注册即自动补席，`manual` 策略走
+`seat.bind`；退席后壳位与画像保留，位置持久、占位者流动。方法：`seat.list/create/get/delete/bind/unbind`；
+事件：`seat.created/filled/released/deleted`；能力：`seat.registry`。
 
 ## License
 

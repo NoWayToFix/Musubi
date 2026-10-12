@@ -27,6 +27,7 @@ type Node struct {
 	Metadata     map[string]any `json:"metadata,omitempty"`
 	LastSeen     string         `json:"last_seen"`
 	RegisteredAt string         `json:"registered_at"`
+	SeatID       *string        `json:"seat_id,omitempty"` // occupied seat (PROTOCOL.md §4.7)
 
 	demo     bool // simulated node: never expires, not serialised
 	misses   int  // heartbeat watchdog misses
@@ -263,9 +264,11 @@ func (r *nodeRegistry) list(f *nodeFilter, limit, offset int) ([]*Node, int) {
 }
 
 // watchdogTick marks real nodes offline after 3 missed heartbeat intervals.
-// Demo nodes are always online.
-func (r *nodeRegistry) watchdogTick(interval time.Duration) {
+// Demo nodes are always online. Returns the ids that transitioned to offline
+// so callers can run side effects (seat release) outside the registry lock.
+func (r *nodeRegistry) watchdogTick(interval time.Duration) []string {
 	r.mu.Lock()
+	var offlined []string
 	defer r.mu.Unlock()
 	cutoff := time.Now().UTC().Add(-2 * interval)
 	for _, n := range r.nodes {
@@ -280,9 +283,11 @@ func (r *nodeRegistry) watchdogTick(interval time.Duration) {
 		}
 		if n.misses >= 3 {
 			n.Status = StatusOffline
+			offlined = append(offlined, n.ID)
 			r.hub.publishNodeStatus(n.ID, StatusOffline)
 		}
 	}
+	return offlined
 }
 
 func cloneNode(n *Node) *Node {
@@ -356,6 +361,11 @@ func (h *Hub) nodeUnregister(cc *CallCtx, p map[string]any) (any, *jsonrpc.Error
 		return nil, jsonrpc.NewError(jsonrpc.CodeNodeNotFound, "node.not_found",
 			map[string]any{"node_id": id})
 	}
+	// seat lifecycle hooks (PROTOCOL.md §4.7): unregistering releases the
+	// occupied seat shell back to vacant.
+	if h.seats != nil {
+		h.seats.releaseByNode(id)
+	}
 	return map[string]any{"node": n}, nil
 }
 
@@ -368,20 +378,64 @@ func (h *Hub) nodeUnsubscribe(cc *CallCtx, p map[string]any) (any, *jsonrpc.Erro
 	if id == "" {
 		return nil, jsonrpc.ErrInvalidParams("subscription_id required")
 	}
-	if !h.events.closeSub(id) {
+	sub := h.events.getSub(id)
+	if sub == nil {
 		return nil, jsonrpc.NewError(jsonrpc.CodeSubNotFound, "subscription.not_found",
 			map[string]any{"subscription_id": id})
 	}
+	if !mayActOn(cc, sub.Owner) {
+		return nil, errForbidden("subscription")
+	}
+	h.events.closeSub(id)
 	return map[string]any{}, nil
 }
 
+// demoCollision reports whether id already belongs to a demo node. Real
+// registrations must not shadow demo nodes: a caller posting id "n-1" to
+// /v1/register would otherwise overwrite the simulated node's identity.
+func (r *nodeRegistry) demoCollision(id string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	n, ok := r.nodes[id]
+	return ok && n.demo
+}
+
+// assignSeat / clearSeat maintain the node-side seat_id mirror (PROTOCOL.md
+// §4.7). Best-effort: unknown nodes are ignored.
+func (r *nodeRegistry) assignSeat(nodeID, seatID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if n, ok := r.nodes[nodeID]; ok {
+		s := seatID
+		n.SeatID = &s
+	}
+}
+
+func (r *nodeRegistry) clearSeat(nodeID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if n, ok := r.nodes[nodeID]; ok {
+		n.SeatID = nil
+	}
+}
+
 // RegisterNode registers a real node via POST /v1/register (online on arrival).
-func (h *Hub) RegisterNode(req RegisterRequest) *Node {
+// It rejects ids that collide with a demo node (-32602: the caller-supplied id
+// is not acceptable); re-registering an existing real node updates it.
+// After a successful registration, vacant `auto` seats matching the node's
+// profile are filled (PROTOCOL.md §4.7 补席).
+func (h *Hub) RegisterNode(req RegisterRequest) (*Node, *jsonrpc.Error) {
 	if req.ID == "" {
 		req.ID = fmt.Sprintf("n-%d", h.nodeSeq.Add(1))
+	}
+	if h.nodes.demoCollision(req.ID) {
+		return nil, jsonrpc.NewError(jsonrpc.CodeInvalidParams, "invalid params: node_id is reserved by a demo node",
+			map[string]any{"node_id": req.ID})
 	}
 	if req.Name == "" {
 		req.Name = req.ID
 	}
-	return h.nodes.register(req, false)
+	n := h.nodes.register(req, false)
+	h.seats.onNodeRegistered(n, false)
+	return n, nil
 }

@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hub.example/schema/seat.json",
+  "title": "Seat model",
+  "description": "A reservable position in the engine (PROTOCOL.md §4.7): the unit of extensibility. standing = occupied by an entity; vacant = reserved, not yet filled. Unknown fields MUST be preserved and ignored by consumers.",
+  "type": "object",
+  "required": ["id", "kind", "created_at"],
+  "properties": {
+    "id": { "type": "string", "examples": ["s-1"] },
+    "kind": { "type": "string", "enum": ["standing", "vacant"] },
+    "name": { "type": "string" },
+    "bind_policy": {
+      "type": "string",
+      "enum": ["auto", "manual"],
+      "description": "Vacant-seat semantics: auto = fill on matching node registration; manual = fill only via seat.bind."
+    },
+    "expect": {
+      "type": "object",
+      "description": "Expected profile a filling node must match. capabilities = all required; tags = any-match; metadata = key/value equality. Unknown fields ignored.",
+      "properties": {
+        "capabilities": { "type": "array", "items": { "type": "string" } },
+        "tags": { "type": "array", "items": { "type": "string" } },
+        "metadata": { "type": "object", "additionalProperties": true }
+      },
+      "additionalProperties": true
+    },
+    "node_id": { "type": ["string", "null"], "description": "Occupier node id; null for vacant seats." },
+    "created_at": { "$ref": "common.json#/definitions/timestamp" },
+    "filled_at": { "type": ["string", "null"], "format": "date-time" },
+    "released_at": { "type": ["string", "null"], "format": "date-time" }
+  },
+  "additionalProperties": true
+}

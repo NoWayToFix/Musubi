@@ -1,7 +1,6 @@
 package hub
 
 import (
-	"fmt"
 	"sync"
 	"time"
 
@@ -40,8 +39,11 @@ type Task struct {
 	Parallel  bool       `json:"-"`
 	commands  []*Command `json:"-"`
 	cancelled bool       `json:"-"`
-	done      chan struct{}
-	doneOnce  sync.Once
+	// owner is the creator's identity (see callerOwner); empty for
+	// anonymous-created tasks, which anyone may cancel.
+	owner    string
+	done     chan struct{}
+	doneOnce sync.Once
 }
 
 type taskRegistry struct {
@@ -224,6 +226,7 @@ func cloneTask(t *Task) *Task {
 		CommandIDs: append([]string(nil), t.CommandIDs...),
 		CreatedAt:  t.CreatedAt,
 		UpdatedAt:  t.UpdatedAt,
+		owner:      t.owner,
 	}
 	if t.Error != nil {
 		e := *t.Error
@@ -260,16 +263,20 @@ func (h *Hub) taskCreate(cc *CallCtx, p map[string]any) (any, *jsonrpc.Error) {
 		if nodeID == "" || method == "" {
 			return nil, jsonrpc.ErrInvalidParams("node_id and method are required per command")
 		}
-		timeout := intParam(pm["timeout"], defaultCommandTimeoutMs)
-		if timeout < 0 {
-			timeout = defaultCommandTimeoutMs
+		timeout, terr := msParam(pm["timeout"], defaultCommandTimeoutMs)
+		if terr != nil {
+			return nil, terr
 		}
 		params, _ := pm["params"].(map[string]any)
 		cmds = append(cmds, h.newCommand(nodeID, method, params, timeout, nil))
 		ids = append(ids, cmds[len(cmds)-1].ID)
 	}
+	owner := callerOwner(cc)
+	for _, c := range cmds {
+		c.owner = owner
+	}
 	t := &Task{
-		ID:         fmt.Sprintf("t-%d", h.taskSeq.Add(1)),
+		ID:         randomID("t-"),
 		Name:       name,
 		Status:     taskRunning,
 		CommandIDs: ids,
@@ -277,6 +284,7 @@ func (h *Hub) taskCreate(cc *CallCtx, p map[string]any) (any, *jsonrpc.Error) {
 		UpdatedAt:  nowTS(),
 		Parallel:   parallel,
 		commands:   cmds,
+		owner:      owner,
 		done:       make(chan struct{}),
 	}
 	taskID := t.ID
@@ -314,7 +322,9 @@ func (h *Hub) taskList(cc *CallCtx, p map[string]any) (any, *jsonrpc.Error) {
 }
 
 // taskCancel cancels all non-terminal commands and waits briefly for the
-// runner to finalise. Terminal tasks are rejected -32021.
+// runner to finalise. Terminal tasks are rejected -32021. A task created by
+// another authenticated session is rejected -32004; anonymous-created tasks
+// (empty owner) stay cancellable by anyone.
 func (h *Hub) taskCancel(cc *CallCtx, p map[string]any) (any, *jsonrpc.Error) {
 	id := strParam(p["task_id"])
 	if id == "" {
@@ -324,6 +334,9 @@ func (h *Hub) taskCancel(cc *CallCtx, p map[string]any) (any, *jsonrpc.Error) {
 	if !ok {
 		return nil, jsonrpc.NewError(jsonrpc.CodeTaskNotFound, "task.not_found",
 			map[string]any{"task_id": id})
+	}
+	if !mayActOn(cc, t.owner) {
+		return nil, errForbidden("task")
 	}
 	if isTaskTerminal(t.Status) {
 		return nil, jsonrpc.NewError(jsonrpc.CodeTaskCancelRej, "task.cancel.rejected",

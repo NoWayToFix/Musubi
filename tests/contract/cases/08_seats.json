@@ -1,0 +1,87 @@
+[
+  {
+    "name": "seat.create 创建虚席（默认 manual）",
+    "request": {"method": "seat.create", "params": {"name": "contract-slot"}},
+    "expect": {
+      "result": {
+        "$.seat.kind": "vacant",
+        "$.seat.bind_policy": "manual",
+        "$.seat.node_id": null,
+        "$.seat.name": "contract-slot"
+      }
+    },
+    "save": {"seat_id": "$.seat.id"}
+  },
+  {
+    "name": "seat.create 支持 auto 与 expect 画像",
+    "request": {
+      "method": "seat.create",
+      "params": {
+        "bind_policy": "auto",
+        "expect": {"capabilities": ["gpu.exec"], "tags": ["x64"]}
+      }
+    },
+    "expect": {"result": {"$.seat.kind": "vacant", "$.seat.bind_policy": "auto"}},
+    "save": {"expect_seat_id": "$.seat.id"}
+  },
+  {
+    "name": "seat.get 获取席位详情",
+    "request": {"method": "seat.get", "params": {"seat_id": "@seat_id"}},
+    "expect": {"result": {"$.seat.id": "@seat_id", "$.seat.kind": "vacant"}}
+  },
+  {
+    "name": "seat.get 不存在返回 -32050",
+    "request": {"method": "seat.get", "params": {"seat_id": "s-999"}},
+    "expect": {"error_code": -32050}
+  },
+  {
+    "name": "seat.list 列出虚席",
+    "request": {"method": "seat.list", "params": {"filter": {"kind": "vacant"}}},
+    "expect": {"result": {"$.total": {"$type": "number"}, "$.seats.length": {"$type": "number"}}}
+  },
+  {
+    "name": "seat.bind 手动补席后为常席",
+    "request": {"method": "seat.bind", "params": {"seat_id": "@seat_id", "node_id": "n-1"}},
+    "expect": {"result": {"$.seat.kind": "standing", "$.seat.node_id": "n-1"}}
+  },
+  {
+    "name": "seat.bind 已占用席位返回 -32051",
+    "request": {"method": "seat.bind", "params": {"seat_id": "@seat_id", "node_id": "n-1"}},
+    "expect": {"error_code": -32051}
+  },
+  {
+    "name": "node.get 返回节点的 seat_id",
+    "request": {"method": "node.get", "params": {"node_id": "n-1"}},
+    "expect": {"result": {"$.node.seat_id": "@seat_id"}}
+  },
+  {
+    "name": "seat.bind 画像不匹配返回 -32052",
+    "request": {"method": "seat.bind", "params": {"seat_id": "@expect_seat_id", "node_id": "n-1"}},
+    "expect": {"error_code": -32052}
+  },
+  {
+    "name": "seat.unbind 退席回虚席（壳位保留）",
+    "request": {"method": "seat.unbind", "params": {"seat_id": "@seat_id"}},
+    "expect": {"result": {"$.seat.kind": "vacant", "$.seat.node_id": null}}
+  },
+  {
+    "name": "seat.unbind 幂等（虚席原样返回）",
+    "request": {"method": "seat.unbind", "params": {"seat_id": "@seat_id"}},
+    "expect": {"result": {"$.seat.kind": "vacant"}}
+  },
+  {
+    "name": "seat.delete 删除虚席",
+    "request": {"method": "seat.delete", "params": {"seat_id": "@seat_id"}},
+    "expect": {"result": {}}
+  },
+  {
+    "name": "seat.delete 后席位消失返回 -32050",
+    "request": {"method": "seat.get", "params": {"seat_id": "@seat_id"}},
+    "expect": {"error_code": -32050}
+  },
+  {
+    "name": "seat.bind 不存在节点返回 -32010",
+    "request": {"method": "seat.bind", "params": {"seat_id": "@expect_seat_id", "node_id": "n-999"}},
+    "expect": {"error_code": -32010}
+  }
+]

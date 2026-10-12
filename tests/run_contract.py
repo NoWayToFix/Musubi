@@ -51,6 +51,7 @@ class Runner:
         self.ctx = {}          # 跨用例变量（@var 引用 / save 捕获）
         self.cursor = 0        # 长轮询游标
         self.next_id = 1000
+        self.skipped_required = []  # 被跳过的必测用例（loudly reported）
 
     # ---------- 传输 ----------
     def rpc(self, payload, timeout=30):
@@ -159,17 +160,25 @@ class Runner:
 
     # ---------- 用例执行 ----------
     def run_case(self, case):
+        """执行一个用例。返回 "pass" 或 "skip"；失败时抛 AssertionError。"""
         name = case.get("name", "?")
         expect = case.get("expect", {})
         result = None
         err = None
 
         # Mode-gated cases (e.g. auth.* in token mode) are skipped unless the
-        # runner's auth mode matches.
+        # runner's auth mode matches. Skips are counted separately and never
+        # inflate the pass count; a skipped case marked "required": true is
+        # loudly visible in the per-case output and the final summary.
         mode = case.get("mode")
         if mode and mode != self.auth:
-            print("  SKIP  %s (mode=%s, current auth=%s)" % (name, mode, self.auth))
-            return True
+            if case.get("required"):
+                self.skipped_required.append(name)
+                print("  SKIP-REQUIRED  %s (mode=%s, current auth=%s) — 必测用例未执行！"
+                      % (name, mode, self.auth))
+            else:
+                print("  SKIP  %s (mode=%s, current auth=%s)" % (name, mode, self.auth))
+            return "skip"
 
         if "batch" in case["request"]:
             result = self.rpc(self.deref(case["request"]["batch"]))
@@ -226,7 +235,7 @@ class Runner:
                     "%s: 事件字段不符 %s 期望 %r 实际 %r" % (name, path, expected, actual)
 
         print("  PASS  %s" % name)
-        return True
+        return "pass"
 
     # ---------- 会话 ----------
     def setup_auth(self):
@@ -246,7 +255,7 @@ class Runner:
         print("== Control Hub 契约测试 ==")
         print("url: %s  auth: %s" % (self.url, self.auth))
         self.setup_auth()
-        total = passed = 0
+        total = passed = skipped = failed = errored = 0
         for f in sorted(Path(cases_dir).glob("*.json")):
             cases = json.loads(f.read_text())
             if isinstance(cases, dict):
@@ -255,14 +264,24 @@ class Runner:
             for case in cases:
                 total += 1
                 try:
-                    self.run_case(case)
-                    passed += 1
+                    outcome = self.run_case(case)
+                    if outcome == "skip":
+                        skipped += 1
+                    else:
+                        passed += 1
                 except AssertionError as e:
                     print("  FAIL  %s: %s" % (case.get("name", "?"), e))
+                    failed += 1
                 except Exception as e:  # noqa: BLE001
                     print("  ERROR %s: %r" % (case.get("name", "?"), e))
-        print("== 结果: %d/%d 通过 ==" % (passed, total))
-        return passed == total
+                    errored += 1
+        if self.skipped_required:
+            print("!! 以下必测用例被跳过（mode 不匹配，未被执行）: %s"
+                  % ", ".join(self.skipped_required))
+        print("== 结果: PASS %d, SKIP %d, FAIL %d, ERROR %d / 共 %d =="
+              % (passed, skipped, failed, errored, total))
+        # 跳过不算失败（mode 门控属正常），但 FAIL/ERROR 任意一个都判失败。
+        return failed == 0 and errored == 0
 
 
 def main():

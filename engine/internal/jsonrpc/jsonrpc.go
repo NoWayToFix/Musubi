@@ -42,6 +42,10 @@ const (
 
 	CodeFeatureDisabled = -32040
 	CodeRateLimited     = -32041
+
+	CodeSeatNotFound       = -32050
+	CodeSeatOccupied       = -32051
+	CodeSeatExpectMismatch = -32052
 )
 
 // Error is a JSON-RPC error object (schema common.json#/definitions/error_object).

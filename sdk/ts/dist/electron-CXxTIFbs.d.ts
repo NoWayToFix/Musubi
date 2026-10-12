@@ -48,6 +48,47 @@ interface Node {
     metadata?: Record<string, unknown>;
     last_seen?: Timestamp;
     registered_at?: Timestamp;
+    seat_id?: string;
+    [key: string]: unknown;
+}
+/** Expected profile a filling node must match (PROTOCOL.md §4.7). */
+interface SeatExpect {
+    capabilities?: string[];
+    tags?: string[];
+    metadata?: Record<string, unknown>;
+    [key: string]: unknown;
+}
+/** A reservable position in the engine (PROTOCOL.md §4.7): the extensibility unit. */
+interface Seat {
+    id?: string;
+    kind?: 'standing' | 'vacant';
+    name?: string;
+    bind_policy?: 'auto' | 'manual';
+    expect?: SeatExpect;
+    node_id?: string | null;
+    created_at?: Timestamp;
+    filled_at?: Timestamp | null;
+    released_at?: Timestamp | null;
+    [key: string]: unknown;
+}
+interface SeatCreateParams {
+    name?: string;
+    bind_policy?: 'auto' | 'manual';
+    expect?: SeatExpect;
+    [key: string]: unknown;
+}
+interface SeatResult {
+    seat?: Seat;
+    [key: string]: unknown;
+}
+interface SeatFilter {
+    kind?: 'standing' | 'vacant';
+    node_id?: string;
+    [key: string]: unknown;
+}
+interface SeatListResult {
+    seats?: Seat[];
+    total?: number;
     [key: string]: unknown;
 }
 type CommandStatus = 'pending' | 'accepted' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'timeout';
@@ -281,6 +322,11 @@ interface SubscribeParams {
 }
 interface EventSubscribeParams extends SubscribeParams {
 }
+/** Handle returned by subscribeEvents() / onNode() / onTask(). */
+interface Subscription {
+    readonly subscription_id: string;
+    unsubscribe(): Promise<void>;
+}
 type TransportKind = 'ws' | 'http' | 'poll';
 /** Options accepted by HubClient (all optional). */
 interface HubClientOptions {
@@ -322,16 +368,6 @@ interface RequestOptions {
     noQueue?: boolean;
     /** Coalesce with other pending requests into one WS batch frame. */
     batch?: boolean;
-}
-/** Handle returned by subscribeEvents() / onNode() / onTask(). */
-interface Subscription {
-    readonly subscription_id: string;
-    unsubscribe(): Promise<void>;
-}
-/** A single event subscription handle returned by subscribeEvents(). */
-interface Subscription {
-    readonly subscription_id: string;
-    unsubscribe(): Promise<void>;
 }
 
 /** Version of this SDK (mirrors package.json). */
@@ -415,6 +451,14 @@ declare class HubClient {
      */
     request<T = unknown>(method: string, params?: Record<string, unknown>, opts?: RequestOptions): Promise<T>;
     private sendWithAuthRetry;
+    /**
+     * Recover from an auth failure: refresh the token pair first (the engine
+     * rotates BOTH access_token and refresh_token and invalidates the old pair,
+     * so refresh() stores the new pair), then fall back to a full re-login with
+     * the configured credentials. Returns true when a fresh token is available
+     * for retrying the original request exactly once.
+     */
+    private recoverAuth;
     private sendOnce;
     /**
      * Register an event handler for a specific event type or '*' (all events,
@@ -434,6 +478,14 @@ declare class HubClient {
     onNode(nodeId?: string): () => void;
     /** Convenience: subscribe to task events; returns an unsubscribe function. */
     onTask(taskId?: string): () => void;
+    /**
+     * Shared helper behind onNode/onTask: subscribes (possibly while offline —
+     * the request is queued and replayed on reconnect) and returns a
+     * synchronous unsubscribe function that is safe to call before the
+     * subscribe call has resolved.
+     */
+    private trackSubscription;
+    private removeActiveSub;
     private restoreSubscriptions;
     info(clientInfo?: ClientInfo): Promise<ServerInfo>;
     ping(): Promise<PingResult>;
@@ -457,6 +509,12 @@ declare class HubClient {
     taskSubscribe(taskId?: string): Promise<SubscribeResult>;
     eventSubscribe(filters?: SubscribeParams): Promise<SubscribeResult>;
     eventUnsubscribe(subscriptionId: string): Promise<UnsubscribeResult>;
+    seatList(filter?: SeatFilter, limit?: number, offset?: number): Promise<SeatListResult>;
+    seatCreate(spec?: SeatCreateParams): Promise<SeatResult>;
+    seatGet(seatId: string): Promise<SeatResult>;
+    seatDelete(seatId: string): Promise<Record<string, never>>;
+    seatBind(seatId: string, nodeId: string): Promise<SeatResult>;
+    seatUnbind(seatId: string): Promise<SeatResult>;
 }
 
 /**

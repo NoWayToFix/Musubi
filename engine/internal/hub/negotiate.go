@@ -20,6 +20,7 @@ var (
 		{"id": "transport.ws", "version": "1.0"},
 		{"id": "transport.http", "version": "1.0"},
 		{"id": "encoding.json", "version": "1.0"},
+		{"id": "seat.registry", "version": "1.0"},
 	}
 
 	hubFeatures = map[string]any{

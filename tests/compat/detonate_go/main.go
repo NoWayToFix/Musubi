@@ -1,8 +1,8 @@
-// Command-line compatibility smoke test (Go SDK version).
+// Command-line compatibility detonation test (Go SDK version).
 //
-// Runs the same assertion sequence as smoke_py.py and smoke_ts.mjs against a
-// running hub, for two transports (long-poll and HTTP/SSE), to prove the Go
-// SDK behaves identically to the Python and TypeScript SDKs.
+// 覆盖与 detonate_py.py / detonate_ts.mjs 相同的核心断言场景（细节按各语言 SDK
+// API 略有差异；本文件对 poll 与 http/SSE 两种传输各跑一轮），证明 Go SDK
+// 与 Python / TypeScript SDK 面对同一契约行为一致。
 //
 // Usage: HUB_URL=http://127.0.0.1:8080 go run .
 package main
@@ -65,7 +65,7 @@ func run(url, transport string) {
 
 	// 1. 版本协商与能力发现
 	info, err := c.Info(ctx, &sdk.ClientInfo{
-		Name: "smoke-go", Version: "1.0.0",
+		Name: "det-go", Version: "1.0.0",
 		ProtocolVersions: []string{"1.0"}, Encodings: []string{"json"},
 		Transports: []string{"ws", "http"},
 	})
@@ -111,7 +111,7 @@ func run(url, transport string) {
 		fmt.Sprint(ev, err))
 
 	// 5. 幂等键：同键二次下发复用首次结果
-	ik := "smoke-ik-" + tag + "-" + strconv.Itoa(os.Getpid())
+	ik := "det-ik-" + tag + "-" + strconv.Itoa(os.Getpid())
 	first, err := c.CommandSend(ctx, sdk.CommandSpec{
 		NodeID: "n-1", Method: "echo", Params: map[string]any{"text": "dedupe"}, IdempotencyKey: ik,
 	})
@@ -147,7 +147,7 @@ func run(url, transport string) {
 		os.Exit(1)
 	}
 	task, err := c.TaskCreate(ctx, sdk.TaskSpec{
-		Name:     "smoke-task-" + tag,
+		Name:     "det-task-" + tag,
 		Commands: []sdk.CommandSpec{{NodeID: "n-3", Method: "echo"}},
 	})
 	if err != nil {
@@ -190,5 +190,5 @@ func main() {
 	}
 	run(url, "poll")
 	run(url, "http")
-	fmt.Printf("GO SDK SMOKE: ALL PASS (%d)\n", passed)
+	fmt.Printf("GO SDK DETONATION: ALL PASS (%d)\n", passed)
 }

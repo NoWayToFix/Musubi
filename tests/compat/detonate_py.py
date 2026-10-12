@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""多语言一致性冒烟测试（Python SDK 版）。
+"""多语言一致性起爆测试（Python SDK 版）。
 
-与 smoke_ts.mjs、smoke_go/main.go 执行完全相同的断言序列，用于验证
+与 detonate_ts.mjs、detonate_go/main.go 覆盖同一套核心断言场景（细节按各语言
+SDK API 略有差异；本文件另对 poll/http 两种传输各跑一轮），用于验证
 三种 SDK 面对同一契约得到一致行为：
 
   1  engine.info 协商协议版本 / 传输能力
@@ -12,10 +13,10 @@
   6  command.batch 同步批量（成功 + 失败混合）
   7  task.create 异步创建 + 事件驱动等待终态
   8  错误码 node.not_found (-32010)
-  9  订阅释放 (event.unsubscribe)
+  9  订阅释放（本地订阅 id，close 后置空）
  10  WS 不可用时自动降级 HTTP（transport=http 强制路径）
 
-用法: python3 tests/compat/smoke_py.py [--url http://127.0.0.1:8080]
+用法: python3 tests/compat/detonate_py.py [--url http://127.0.0.1:8080]
 """
 import argparse
 import os
@@ -58,7 +59,7 @@ def run(url, transport):
     c = HubClient(url, timeout=10, transport=transport)
 
     # 1. 版本协商与能力发现
-    info = c.info({"name": "smoke-py", "version": "1.0.0",
+    info = c.info({"name": "det-py", "version": "1.0.0",
                    "protocol_versions": ["1.0"], "encodings": ["json"],
                    "transports": ["ws", "http"]})
     check("%s engine.info 协商" % tag, info.get("protocol_version") == "1.0", repr(info))
@@ -86,7 +87,7 @@ def run(url, transport):
           ev["data"]["status"] == "succeeded" and ev["data"]["result"]["text"] == "hi", repr(ev))
 
     # 5. 幂等键：同键二次下发复用首次结果
-    ik = "smoke-ik-" + iksuffix
+    ik = "det-ik-" + iksuffix
     first = c.command_send("n-1", "echo", {"text": "dedupe"}, idempotency_key=ik)
     wait_for(sub, lambda e: e.get("type") == "command.result"
              and e.get("data", {}).get("id") == first["command"]["id"])
@@ -103,7 +104,7 @@ def run(url, transport):
 
     # 7. task.create 异步：等待 task.completed
     tsub = c.subscribe({"event_types": ["task.completed", "task.failed"]})
-    task = c.task_create("smoke-task-" + tag, [{"node_id": "n-3", "method": "echo"}])
+    task = c.task_create("det-task-" + tag, [{"node_id": "n-3", "method": "echo"}])
     task_id = task["task"]["id"]
     tev = wait_for(tsub, lambda e: e.get("task_id") == task_id
                    and e.get("type") in ("task.completed", "task.failed"))
@@ -117,9 +118,11 @@ def run(url, transport):
     except HubError as e:
         check("%s node.not_found -32010" % tag, e.code == -32010, str(e))
 
-    # 9. 订阅释放
+    # 9. 订阅释放（SDK 现状：订阅为传输层本地 id "local-N"，close 后 id 置空）
+    check("%s 订阅 id 为传输层本地 id" % tag,
+          isinstance(sub.id, str) and sub.id.startswith("local-"), repr(sub.id))
     sub.close()
-    check("%s event.unsubscribe" % tag, sub.id is None, "sub.id 应清空")
+    check("%s event.unsubscribe (close 后 id 置空)" % tag, sub.id is None, "sub.id 应清空")
     tsub.close()
 
     c.close()
@@ -133,7 +136,7 @@ def main():
     # 事件订阅依赖长轮询；再跑一轮强制 HTTP 调用路径验证传输无关性。
     run(args.url, "poll")
     run(args.url, "http")
-    print("PYTHON SDK SMOKE: ALL PASS (%d)" % len(PASSED))
+    print("PYTHON SDK DETONATION: ALL PASS (%d)" % len(PASSED))
 
 
 if __name__ == "__main__":

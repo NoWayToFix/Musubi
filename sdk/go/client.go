@@ -49,19 +49,32 @@ type Options struct {
 	MaxRetries    int           // reconnect retries; <0 = unlimited (default -1)
 	ReconnectBase time.Duration // backoff base (default 1s; factor 2, max 30s, ±20% jitter)
 	Logger        *log.Logger   // optional debug logger
+
+	// DisableOfflineQueue turns off the offline write queue (PROTOCOL.md
+	// §6.2). By default, queueable writes (everything except engine.* and
+	// auth.*) that fail with a transport-level error are buffered (FIFO,
+	// cap 1000) and replayed in order when the connection recovers; the
+	// failed Call returns ErrQueued in that case.
+	DisableOfflineQueue bool
+
+	// OnError receives fatal background-loop errors that have no caller to
+	// return them to, e.g. the long-poll loop stopping on a 401/403 or
+	// exhausting MaxRetries. Optional.
+	OnError func(error)
 }
 
 // HubClient talks to the hub over JSON-RPC 2.0.
 type HubClient struct {
 	opts Options
 
-	mu        sync.Mutex
-	idSeq     int64
-	baseURL   *url.URL
-	transport string // resolved: "ws" or "http"
-	server    *ServerInfo
-	token     string
-	closed    bool
+	mu           sync.Mutex
+	idSeq        int64
+	baseURL      *url.URL
+	transport    string // resolved: "ws" or "http"
+	server       *ServerInfo
+	token        string
+	refreshToken string // auth.refresh token; rotates together with the access token
+	closed       bool
 
 	// WebSocket state (transport == "ws").
 	ws            *WSConn
@@ -76,7 +89,10 @@ type HubClient struct {
 	sseLoop *sseLoop  // SSE loop
 
 	// Offline write queue (PROTOCOL.md §6.2). Optional best-effort replay.
-	offline []map[string]any
+	offline []queuedWrite
+	flushMu sync.Mutex // serializes offline-queue replays
+
+	refreshMu sync.Mutex // single-flights auth.refresh (token rotation)
 }
 
 type rpcResponse struct {
@@ -127,6 +143,15 @@ func (c *HubClient) logf(format string, args ...any) {
 	if c.opts.Logger != nil {
 		c.opts.Logger.Printf(format, args...)
 	}
+}
+
+// notifyError reports a fatal background-loop error to Options.OnError
+// (best-effort: never panics on a nil callback).
+func (c *HubClient) notifyError(err error) {
+	if err == nil || c.opts.OnError == nil {
+		return
+	}
+	c.opts.OnError(err)
 }
 
 // ---------------------------------------------------------------------------
@@ -228,8 +253,23 @@ func remap(src map[string]any, dst any) error {
 // Call
 // ---------------------------------------------------------------------------
 
+// ErrQueued is returned by Call when the request was not executed because the
+// transport failed and the write was buffered in the offline queue instead
+// (PROTOCOL.md §6.2); it is replayed automatically on reconnect. Detect with
+// errors.Is(err, ErrQueued).
+var ErrQueued = errors.New("hub: write queued offline (will replay on reconnect)")
+
+// queuedWrite is one buffered offline request.
+type queuedWrite struct {
+	method string
+	params map[string]any
+}
+
 // Call performs a JSON-RPC request. It returns the result object on success
 // or a *HubError (inspect with errors.As) on JSON-RPC error.
+//
+// A server-returned *HubError is authoritative: the request was already
+// processed, so it is never retried on another transport nor queued offline.
 func (c *HubClient) Call(ctx context.Context, method string, params map[string]any) (map[string]any, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -238,15 +278,165 @@ func (c *HubClient) Call(ctx context.Context, method string, params map[string]a
 		return nil, err
 	}
 
+	res, err := c.callAuthRetry(ctx, method, params)
+	if err == nil {
+		// The connection works: replay writes buffered while offline, in FIFO
+		// order (PROTOCOL.md §6.2).
+		c.flushOffline()
+	}
+	return res, err
+}
+
+// callAuthRetry performs the request once; on an auth error (-32003
+// expired / -32002 invalid) it refreshes the session once — when a refresh
+// token is held — and retries exactly once. A call made with an access token
+// that was just rotated away (concurrent refresh) therefore recovers instead
+// of failing hard.
+func (c *HubClient) callAuthRetry(ctx context.Context, method string, params map[string]any) (map[string]any, error) {
+	tokenBefore := c.currentToken()
+	res, err := c.call(ctx, method, params)
+	if !isAuthErr(err) {
+		return res, err
+	}
+	if !c.refreshAuth(ctx, tokenBefore) {
+		return res, err // nothing changed: surface the original error
+	}
+	return c.call(ctx, method, params)
+}
+
+// call sends one request over WebSocket (degrading to HTTP POST for
+// transport-level failures, PROTOCOL.md §6.1) or HTTP POST directly.
+func (c *HubClient) call(ctx context.Context, method string, params map[string]any) (map[string]any, error) {
 	if c.opts.Transport == "ws" || c.transport == "ws" {
 		res, err := c.callWS(ctx, method, params)
 		if err == nil {
 			return res, nil
 		}
-		// WS failed; fall back to HTTP POST (transport degradation per §6.1).
+		if !isTransportErr(err) {
+			// Authoritative server response (a *HubError): the server already
+			// executed the request — resending over HTTP would execute it
+			// twice. Surface it as-is.
+			return nil, err
+		}
+		// WS failed at transport level; fall back to HTTP POST (§6.1).
 		c.logf("ws call %s failed: %v; falling back to http", method, err)
 	}
-	return c.callHTTP(ctx, method, params)
+
+	res, err := c.callHTTP(ctx, method, params)
+	if err == nil {
+		return res, nil
+	}
+	if !isTransportErr(err) || !queueable(method) || c.opts.DisableOfflineQueue {
+		return nil, err
+	}
+	// Transport-level failure on a queueable write: buffer for replay on
+	// reconnect (§6.2) and tell the caller it was not executed.
+	if c.enqueueOffline(method, params) {
+		return nil, ErrQueued
+	}
+	return nil, err // queue full: surface the transport error (at-most-once)
+}
+
+// isTransportErr reports whether err is a transport-level failure (dial,
+// read/write, closed connection, timeout) rather than an authoritative server
+// response. Only transport failures may be retried on the fallback transport
+// or queued offline.
+func isTransportErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	var he *HubError
+	if errors.As(err, &he) {
+		return false // server-returned JSON-RPC error: authoritative
+	}
+	if errors.Is(err, context.Canceled) {
+		return false // the caller aborted; never resend
+	}
+	return true
+}
+
+// isAuthErr reports whether the server rejected the request because the
+// session token expired or was invalidated (e.g. rotated away).
+func isAuthErr(err error) bool {
+	var he *HubError
+	if !errors.As(err, &he) {
+		return false
+	}
+	return he.Code == ErrAuthExpired || he.Code == ErrAuthInvalid
+}
+
+// queueable reports whether a method may be buffered while offline: everything
+// except engine.* (negotiation/liveness) and auth.* (session state) — the
+// same rule the TS SDK applies (PROTOCOL.md §6.2).
+func queueable(method string) bool {
+	return !strings.HasPrefix(method, "engine.") && !strings.HasPrefix(method, "auth.")
+}
+
+// currentToken returns the access token currently in use.
+func (c *HubClient) currentToken() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.token
+}
+
+// setAuth updates the stored token pair. Under rotation both tokens change
+// together; empty values leave the stored ones untouched.
+func (c *HubClient) setAuth(access, refresh string) {
+	c.mu.Lock()
+	if access != "" {
+		c.token = access
+	}
+	if refresh != "" {
+		c.refreshToken = refresh
+	}
+	c.mu.Unlock()
+}
+
+// refreshAuth performs one auth.refresh with the stored refresh token,
+// bypassing the auto-retry path. It reports whether the access token changed
+// (so the failed request is worth retrying). Concurrent callers are
+// single-flighted: if another goroutine already rotated the token, the caller
+// proceeds with the new one instead of burning the rotated-away refresh token.
+func (c *HubClient) refreshAuth(ctx context.Context, failedToken string) bool {
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
+
+	c.mu.Lock()
+	rt := c.refreshToken
+	cur := c.token
+	c.mu.Unlock()
+	if rt == "" {
+		return false
+	}
+	if failedToken != "" && cur != failedToken {
+		return true // already rotated by a concurrent refresh
+	}
+
+	res, err := c.call(ctx, "auth.refresh", map[string]any{"refresh_token": rt})
+	if err != nil {
+		var he *HubError
+		if errors.As(err, &he) && he.IsAuth() {
+			// The refresh token itself was rejected (invalidated by rotation
+			// or expired): drop it so later calls do not retry a dead pair.
+			c.mu.Lock()
+			if c.refreshToken == rt {
+				c.refreshToken = ""
+			}
+			c.mu.Unlock()
+		}
+		c.logf("auth.refresh failed: %v", err)
+		return false
+	}
+	var ar AuthResult
+	if err := remap(res, &ar); err != nil {
+		c.logf("auth.refresh decode failed: %v", err)
+		return false
+	}
+	c.setAuth(ar.AccessToken, ar.RefreshToken)
+	c.mu.Lock()
+	changed := c.token != "" && c.token != failedToken
+	c.mu.Unlock()
+	return changed
 }
 
 func (c *HubClient) callHTTP(ctx context.Context, method string, params map[string]any) (map[string]any, error) {
@@ -319,6 +509,12 @@ func (c *HubClient) callWS(ctx context.Context, method string, params map[string
 	ch := make(chan *rpcResponse, 1)
 	c.pending[id] = ch
 	c.mu.Unlock()
+	if ws == nil {
+		// The connection dropped between ensureWS and here (read loop
+		// already closed it): report a transport error so the caller can
+		// fall back to HTTP instead of dereferencing nil.
+		return nil, errors.New("hub: websocket connection closed")
+	}
 
 	if err := ws.WriteText(body); err != nil {
 		c.mu.Lock()
@@ -326,6 +522,19 @@ func (c *HubClient) callWS(ctx context.Context, method string, params map[string
 		c.mu.Unlock()
 		return nil, err
 	}
+
+	// Apply the caller-configured timeout to WS calls too (it bounds HTTP
+	// calls already); a context deadline always wins when it is shorter. The
+	// 60s read-deadline safety net in wsReadLoop still bounds the connection
+	// itself.
+	timeout := c.opts.Timeout
+	if deadline, ok := ctx.Deadline(); ok {
+		if d := time.Until(deadline); d < timeout {
+			timeout = d
+		}
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 
 	select {
 	case env := <-ch:
@@ -347,6 +556,11 @@ func (c *HubClient) callWS(ctx context.Context, method string, params map[string
 		delete(c.pending, id)
 		c.mu.Unlock()
 		return nil, ctx.Err()
+	case <-timer.C:
+		c.mu.Lock()
+		delete(c.pending, id)
+		c.mu.Unlock()
+		return nil, fmt.Errorf("hub: ws call %s timed out after %s", method, timeout)
 	}
 }
 
@@ -394,6 +608,7 @@ func (c *HubClient) wsReadLoop() {
 		ws, err := c.dialWS()
 		if err != nil {
 			if !c.backoffWait(retries) {
+				c.notifyError(fmt.Errorf("hub: websocket reconnect gave up after %d retries: %w", retries, err))
 				return
 			}
 			retries++
@@ -402,10 +617,12 @@ func (c *HubClient) wsReadLoop() {
 		retries = 0
 		go c.wsHeartbeat(ws)
 
-		// Re-subscribe active subscriptions on (re)connect.
+		// Re-subscribe active subscriptions on (re)connect, then replay any
+		// writes buffered while offline (PROTOCOL.md §6.2).
 		for _, s := range c.snapshotSubs() {
 			s.resubscribe()
 		}
+		go c.flushOffline()
 
 		for {
 			_ = ws.SetReadDeadline(time.Now().Add(wsHeartbeatEvery + 30*time.Second))
@@ -718,6 +935,8 @@ func (c *HubClient) Capabilities(ctx context.Context) ([]Capability, map[string]
 
 // Login authenticates with the given params (PROTOCOL.md §3.5):
 // token: {"token": "..."} / basic: {"username": "...", "password": "..."}.
+// Both the access and the refresh token of the result are stored; the SDK
+// keeps them as a pair (a refresh response may rotate both).
 func (c *HubClient) Login(ctx context.Context, params map[string]any) (*AuthResult, error) {
 	if params == nil {
 		params = map[string]any{}
@@ -731,9 +950,7 @@ func (c *HubClient) Login(ctx context.Context, params map[string]any) (*AuthResu
 		return nil, err
 	}
 	if ar.AccessToken != "" {
-		c.mu.Lock()
-		c.token = ar.AccessToken
-		c.mu.Unlock()
+		c.setAuth(ar.AccessToken, ar.RefreshToken)
 	}
 	return &ar, nil
 }
@@ -748,25 +965,49 @@ func (c *HubClient) LoginBasic(ctx context.Context, username, password string) (
 	return c.Login(ctx, map[string]any{"username": username, "password": password})
 }
 
-// Refresh exchanges a refresh token for a new access token.
+// Refresh exchanges a refresh token for a new session. Under rotation the
+// server returns a NEW access_token AND a NEW refresh_token and invalidates
+// the old pair; both are stored. When refreshToken is empty, the stored
+// refresh token (from Login or a previous Refresh) is used.
 func (c *HubClient) Refresh(ctx context.Context, refreshToken string) (*AuthResult, error) {
-	res, err := c.Call(ctx, "auth.refresh", map[string]any{"refresh_token": refreshToken})
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if refreshToken == "" {
+		c.mu.Lock()
+		refreshToken = c.refreshToken
+		c.mu.Unlock()
+	}
+	if refreshToken == "" {
+		return nil, errors.New("hub: auth.refresh requires a refresh token")
+	}
+	if err := c.resolveTransport(ctx); err != nil {
+		return nil, err
+	}
+	// c.call, not Call: no auto-refresh retry on the refresh call itself.
+	res, err := c.call(ctx, "auth.refresh", map[string]any{"refresh_token": refreshToken})
 	if err != nil {
+		var he *HubError
+		if errors.As(err, &he) && he.IsAuth() {
+			// The refresh token was rejected: drop it so later calls do not
+			// keep retrying a dead pair.
+			c.mu.Lock()
+			if c.refreshToken == refreshToken {
+				c.refreshToken = ""
+			}
+			c.mu.Unlock()
+		}
 		return nil, err
 	}
 	var ar AuthResult
 	if err := remap(res, &ar); err != nil {
 		return nil, err
 	}
-	if ar.AccessToken != "" {
-		c.mu.Lock()
-		c.token = ar.AccessToken
-		c.mu.Unlock()
-	}
+	c.setAuth(ar.AccessToken, ar.RefreshToken)
 	return &ar, nil
 }
 
-// Logout revokes the current token.
+// Logout revokes the current token and clears the stored session pair.
 func (c *HubClient) Logout(ctx context.Context) error {
 	_, err := c.Call(ctx, "auth.logout", map[string]any{})
 	if err != nil {
@@ -774,6 +1015,7 @@ func (c *HubClient) Logout(ctx context.Context) error {
 	}
 	c.mu.Lock()
 	c.token = ""
+	c.refreshToken = ""
 	c.mu.Unlock()
 	return nil
 }
@@ -1223,8 +1465,31 @@ func (pl *pollLoop) end() {
 	})
 }
 
+// pollError is an HTTP-level failure of a long-poll request. fatal marks
+// errors that retrying cannot fix with the current credentials (401/403).
+type pollError struct {
+	status int
+	fatal  bool
+}
+
+func (e *pollError) Error() string {
+	return fmt.Sprintf("hub: poll http status %d", e.status)
+}
+
 // run polls /v1/poll with an increasing cursor, applying backoff on error.
 // Events are dispatched to matching subscriptions (deduplicated by event.id).
+//
+// Response classification: 2xx proceeds, 401/403 are fatal (the loop stops
+// and the error is surfaced via Options.OnError — retrying with the same
+// credentials cannot succeed), any other non-2xx and network errors are
+// retryable with the existing backoff.
+//
+// Cursor: on the first successful poll after one or more failures (a
+// reconnect), the cursor is reset to 0 and history is re-read. The engine
+// cursor is in-memory (engine restart resets it to 0) and the protocol has no
+// "cursor invalid" signal, so a stale cursor after an engine restart would
+// starve the client forever; duplicates from the replay are suppressed by the
+// event.id dedup window (§6.2).
 func (pl *pollLoop) run() {
 	retries := 0
 	for {
@@ -1235,11 +1500,31 @@ func (pl *pollLoop) run() {
 		}
 		events, cursor, err := pl.pollOnce(pl.cursor)
 		if err != nil {
+			var perr *pollError
+			if errors.As(err, &perr) && perr.fatal {
+				pl.c.logf("poll loop stopped: %v", err)
+				pl.c.notifyError(err)
+				pl.end()
+				// Allow a later EventSubscribe to restart the loop (e.g.
+				// after the application re-authenticated).
+				pl.c.mu.Lock()
+				if pl.c.poller == pl {
+					pl.c.poller = nil
+				}
+				pl.c.mu.Unlock()
+				return
+			}
 			if !pl.c.backoffWait(retries) {
+				pl.c.notifyError(fmt.Errorf("hub: poll loop gave up after %d retries: %w", retries, err))
 				return
 			}
 			retries++
 			continue
+		}
+		if retries > 0 {
+			// First success after a failure = (re)connect: re-read history
+			// from the server's initial cursor (see doc comment above).
+			pl.cursor = 0
 		}
 		retries = 0
 		if cursor > pl.cursor {
@@ -1293,6 +1578,16 @@ func (pl *pollLoop) pollOnce(cursor int64) ([]*HubEvent, int64, error) {
 		return nil, cursor, err
 	}
 	defer resp.Body.Close()
+	switch {
+	case resp.StatusCode >= 200 && resp.StatusCode < 300:
+		// proceed below
+	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+		// Auth failure: retrying with the same credentials cannot succeed.
+		return nil, cursor, &pollError{status: resp.StatusCode, fatal: true}
+	default:
+		// 4xx/5xx: transient server-side trouble, retry with backoff.
+		return nil, cursor, &pollError{status: resp.StatusCode}
+	}
 	var out struct {
 		Cursor int64       `json:"cursor"`
 		Events []*HubEvent `json:"events"`
@@ -1513,22 +1808,66 @@ func (d *dedup) add(id string) bool {
 // offline queue
 // ---------------------------------------------------------------------------
 
-// QueueWrite enqueues a write operation while offline. This is an optional
-// best-effort offline queue (PROTOCOL.md §6.2, limit 1000): when the
-// connection recovers, queued operations are replayed in order.
-//
-// TODO: wire this into Call so command.send / task.create / node.* calls made
-// while disconnected are queued and replayed after reconnect. Currently the
-// SDK surfaces the transport error to the caller instead, which is the
-// simpler "at-most-once" default.
-func (c *HubClient) QueueWrite(req map[string]any) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if len(c.offline) >= offlineQueueLimit {
+// QueueWrite manually enqueues a write operation for replay when the
+// connection recovers (PROTOCOL.md §6.2, FIFO, cap 1000). Most callers do not
+// need it: by default Call already buffers queueable writes (everything
+// except engine.* and auth.*) whose transport failed and returns ErrQueued.
+// Returns false when the queue is full or the client is closed.
+func (c *HubClient) QueueWrite(method string, params map[string]any) bool {
+	if !queueable(method) {
 		return false
 	}
-	c.offline = append(c.offline, req)
+	return c.enqueueOffline(method, params)
+}
+
+// enqueueOffline buffers one write; reports false when the client is closed
+// or the queue is at its limit (offlineQueueLimit).
+func (c *HubClient) enqueueOffline(method string, params map[string]any) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed || len(c.offline) >= offlineQueueLimit {
+		return false
+	}
+	c.offline = append(c.offline, queuedWrite{method: method, params: params})
 	return true
+}
+
+// flushOffline replays buffered writes in FIFO order over HTTP. It runs after
+// a successful call proves the connection works and after a WS (re)connect.
+// A write that fails again at transport level is put back at the front (the
+// client is still offline); one that fails with a server error can never
+// succeed as-is and is dropped (best-effort semantics, §6.2).
+func (c *HubClient) flushOffline() {
+	if !c.flushMu.TryLock() {
+		return // a concurrent flush will pick up everything queued
+	}
+	defer c.flushMu.Unlock()
+	for {
+		c.mu.Lock()
+		if c.closed || len(c.offline) == 0 {
+			c.mu.Unlock()
+			return
+		}
+		item := c.offline[0]
+		c.offline = c.offline[1:]
+		c.mu.Unlock()
+
+		if _, err := c.callHTTP(context.Background(), item.method, item.params); err != nil {
+			if isTransportErr(err) {
+				c.pushFrontOffline(item)
+				return // still offline: retry on the next trigger
+			}
+			c.logf("offline replay of %s dropped: %v", item.method, err)
+		}
+	}
+}
+
+// pushFrontOffline puts an unsent write back at the front of the queue,
+// preserving FIFO order relative to writes enqueued meanwhile.
+func (c *HubClient) pushFrontOffline(item queuedWrite) {
+	c.mu.Lock()
+	c.offline = append([]queuedWrite{item}, c.offline...)
+	c.mu.Unlock()
 }
 
 // Close shuts down the client and all background loops.
@@ -1550,6 +1889,7 @@ func (c *HubClient) Close() error {
 		subs = append(subs, s)
 	}
 	c.subs = map[string]*Subscription{}
+	c.offline = nil // buffered writes die with the client (at-most-once)
 	c.mu.Unlock()
 
 	for _, s := range subs {
@@ -1588,4 +1928,112 @@ func ParseEvent(notification map[string]any) *HubEvent {
 		return nil
 	}
 	return env.Params.Event
+}
+
+// ---------------------------------------------------------------------------
+// seat.* (PROTOCOL.md §4.7)
+// ---------------------------------------------------------------------------
+
+// SeatList lists seats (filter: {kind?, node_id?}, limit/offset optional).
+// kind is "standing" (occupied) or "vacant" (reserved).
+func (c *HubClient) SeatList(ctx context.Context, filter map[string]any, limit, offset int) (*SeatListResult, error) {
+	params := map[string]any{}
+	if filter != nil {
+		params["filter"] = filter
+	}
+	if limit > 0 {
+		params["limit"] = limit
+	}
+	if offset > 0 {
+		params["offset"] = offset
+	}
+	res, err := c.Call(ctx, "seat.list", params)
+	if err != nil {
+		return nil, err
+	}
+	var out SeatListResult
+	if err := remap(res, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// SeatCreate creates a vacant seat (PROTOCOL.md §4.7).
+func (c *HubClient) SeatCreate(ctx context.Context, spec SeatSpec) (*Seat, error) {
+	params := map[string]any{}
+	if spec.Name != "" {
+		params["name"] = spec.Name
+	}
+	if spec.BindPolicy != "" {
+		params["bind_policy"] = spec.BindPolicy
+	}
+	if spec.Expect != nil {
+		params["expect"] = spec.Expect
+	}
+	res, err := c.Call(ctx, "seat.create", params)
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Seat *Seat `json:"seat"`
+	}
+	if err := remap(res, &out); err != nil {
+		return nil, err
+	}
+	return out.Seat, nil
+}
+
+// SeatGet fetches one seat by id.
+func (c *HubClient) SeatGet(ctx context.Context, seatID string) (*Seat, error) {
+	res, err := c.Call(ctx, "seat.get", map[string]any{"seat_id": seatID})
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Seat *Seat `json:"seat"`
+	}
+	if err := remap(res, &out); err != nil {
+		return nil, err
+	}
+	return out.Seat, nil
+}
+
+// SeatDelete deletes a vacant seat (release a standing seat first; otherwise
+// the server answers -32051 seat.occupied).
+func (c *HubClient) SeatDelete(ctx context.Context, seatID string) error {
+	_, err := c.Call(ctx, "seat.delete", map[string]any{"seat_id": seatID})
+	return err
+}
+
+// SeatBind manually assigns a node to a vacant seat (fill). A node that
+// already occupies another seat auto-releases it first (one seat per node).
+func (c *HubClient) SeatBind(ctx context.Context, seatID, nodeID string) (*Seat, error) {
+	res, err := c.Call(ctx, "seat.bind", map[string]any{"seat_id": seatID, "node_id": nodeID})
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Seat *Seat `json:"seat"`
+	}
+	if err := remap(res, &out); err != nil {
+		return nil, err
+	}
+	return out.Seat, nil
+}
+
+// SeatUnbind releases the occupant, returning the seat to vacant. The shell
+// and its expect profile are kept for a later refill. Idempotent: unbinding a
+// vacant seat returns it unchanged.
+func (c *HubClient) SeatUnbind(ctx context.Context, seatID string) (*Seat, error) {
+	res, err := c.Call(ctx, "seat.unbind", map[string]any{"seat_id": seatID})
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Seat *Seat `json:"seat"`
+	}
+	if err := remap(res, &out); err != nil {
+		return nil, err
+	}
+	return out.Seat, nil
 }

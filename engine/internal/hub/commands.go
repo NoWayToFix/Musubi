@@ -49,6 +49,9 @@ type Command struct {
 	TaskID         *string        `json:"task_id"`
 
 	cancelCh chan struct{} // closed to cancel (internal)
+	// owner is the creator's identity (see callerOwner); empty for
+	// anonymous-created commands, which anyone may cancel.
+	owner string
 }
 
 func isTerminal(s string) bool {
@@ -286,9 +289,9 @@ func (h *Hub) cmdSend(cc *CallCtx, p map[string]any) (any, *jsonrpc.Error) {
 	if nodeID == "" || method == "" {
 		return nil, jsonrpc.ErrInvalidParams("node_id and method are required")
 	}
-	timeout := intParam(p["timeout"], defaultCommandTimeoutMs)
-	if timeout < 0 {
-		timeout = defaultCommandTimeoutMs
+	timeout, terr := msParam(p["timeout"], defaultCommandTimeoutMs)
+	if terr != nil {
+		return nil, terr
 	}
 	params, _ := p["params"].(map[string]any)
 	ik := strParam(p["idempotency_key"])
@@ -298,11 +301,13 @@ func (h *Hub) cmdSend(cc *CallCtx, p map[string]any) (any, *jsonrpc.Error) {
 			return map[string]any{"command": c}, nil
 		}
 	}
-	// Reserve the node atomically so concurrent sends see busy (-32012).
+	// tryAcquire refcounts concurrent commands (nodes.go): it only fails for
+	// missing/offline/unknown nodes, never for a busy one.
 	if !h.nodes.tryAcquire(nodeID) {
 		return nil, h.nodeBusyOrOfflineError(nodeID)
 	}
 	cmd := h.newCommand(nodeID, method, params, timeout, nil)
+	cmd.owner = callerOwner(cc)
 	cmd.IdempotencyKey = ik
 	h.cmds.create(cmd, ik)
 	h.publishCommandAccepted(cmd)
@@ -331,22 +336,23 @@ func (h *Hub) cmdBatch(cc *CallCtx, p map[string]any) (any, *jsonrpc.Error) {
 	for _, rc := range rawCmds {
 		pm, ok := rc.(map[string]any)
 		if !ok {
-			out = append(out, h.failedSpecCommand("", "", nil, 0, jsonrpc.ErrInvalidParams("invalid command entry")))
+			out = append(out, h.failedSpecCommand("", "", nil, 0, "", jsonrpc.ErrInvalidParams("invalid command entry")))
 			continue
 		}
 		nodeID := strParam(pm["node_id"])
 		method := strParam(pm["method"])
 		if nodeID == "" || method == "" {
-			out = append(out, h.failedSpecCommand(nodeID, method, nil, 0,
+			out = append(out, h.failedSpecCommand(nodeID, method, nil, 0, "",
 				jsonrpc.ErrInvalidParams("node_id and method are required")))
 			continue
 		}
-		timeout := intParam(pm["timeout"], defaultCommandTimeoutMs)
-		if timeout < 0 {
-			timeout = defaultCommandTimeoutMs
+		timeout, terr := msParam(pm["timeout"], defaultCommandTimeoutMs)
+		if terr != nil {
+			out = append(out, h.failedSpecCommand(nodeID, method, nil, 0, "", terr))
+			continue
 		}
 		params, _ := pm["params"].(map[string]any)
-		out = append(out, h.sendSync(nodeID, method, params, timeout, nil))
+		out = append(out, h.sendSync(nodeID, method, params, timeout, nil, callerOwner(cc)))
 	}
 	res := map[string]any{"commands": out, "task_id": nil}
 	if ik != "" {
@@ -356,6 +362,8 @@ func (h *Hub) cmdBatch(cc *CallCtx, p map[string]any) (any, *jsonrpc.Error) {
 }
 
 // cmdCancel implements command.cancel; terminal commands are rejected -32014.
+// A command created by another authenticated session is rejected -32004;
+// anonymous-created commands (empty owner) stay cancellable by anyone.
 func (h *Hub) cmdCancel(cc *CallCtx, p map[string]any) (any, *jsonrpc.Error) {
 	id := strParam(p["command_id"])
 	if id == "" {
@@ -365,6 +373,9 @@ func (h *Hub) cmdCancel(cc *CallCtx, p map[string]any) (any, *jsonrpc.Error) {
 	if !ok {
 		return nil, jsonrpc.NewError(jsonrpc.CodeCommandNotFound, "command.not_found",
 			map[string]any{"command_id": id})
+	}
+	if !mayActOn(cc, c.owner) {
+		return nil, errForbidden("command")
 	}
 	if isTerminal(c.Status) {
 		return nil, jsonrpc.NewError(jsonrpc.CodeCommandCancelRej, "command.cancel.rejected",
@@ -380,7 +391,7 @@ func (h *Hub) cmdCancel(cc *CallCtx, p map[string]any) (any, *jsonrpc.Error) {
 
 func (h *Hub) newCommand(nodeID, method string, params map[string]any, timeout int, taskID *string) *Command {
 	return &Command{
-		ID:        fmt.Sprintf("c-%d", h.cmdSeq.Add(1)),
+		ID:        randomID("c-"),
 		NodeID:    nodeID,
 		Method:    method,
 		Params:    params,
@@ -427,16 +438,18 @@ func (h *Hub) runCommand(cmd *Command) *Command {
 
 // sendSync creates and executes one command to completion (command.batch and
 // task commands). Node problems are embedded in the command's error field.
-func (h *Hub) sendSync(nodeID, method string, params map[string]any, timeout int, taskID *string) *Command {
+func (h *Hub) sendSync(nodeID, method string, params map[string]any, timeout int, taskID *string, owner string) *Command {
 	if !h.nodes.tryAcquire(nodeID) {
 		code, msg, data := h.nodeBusyOrOfflineCode(nodeID)
 		c := h.newCommand(nodeID, method, params, timeout, taskID)
+		c.owner = owner
 		h.cmds.create(c, "")
 		h.cmds.finish(c.ID, cmdFailed, nil, jsonrpc.NewError(code, msg, data))
 		return h.cmds.snapshot(c.ID)
 	}
 	defer h.nodes.release(nodeID)
 	cmd := h.newCommand(nodeID, method, params, timeout, taskID)
+	cmd.owner = owner
 	h.cmds.create(cmd, "")
 	h.publishCommandAccepted(cmd)
 	return h.runCommand(cmd)
@@ -444,8 +457,9 @@ func (h *Hub) sendSync(nodeID, method string, params map[string]any, timeout int
 
 // failedSpecCommand builds a command that failed before touching any node
 // (malformed batch entries).
-func (h *Hub) failedSpecCommand(nodeID, method string, params map[string]any, timeout int, rerr *jsonrpc.Error) *Command {
+func (h *Hub) failedSpecCommand(nodeID, method string, params map[string]any, timeout int, owner string, rerr *jsonrpc.Error) *Command {
 	c := h.newCommand(nodeID, method, params, timeout, nil)
+	c.owner = owner
 	h.cmds.create(c, "")
 	h.cmds.finish(c.ID, cmdFailed, nil, rerr)
 	return h.cmds.snapshot(c.ID)
@@ -457,8 +471,11 @@ func (h *Hub) nodeBusyOrOfflineError(id string) *jsonrpc.Error {
 }
 
 // nodeBusyOrOfflineCode resolves the error for a node that cannot accept a
-// command: missing -> -32010 node.not_found, offline -> -32011 node.offline,
-// busy -> -32012 node.busy (PROTOCOL.md §7.2).
+// command: missing -> -32010 node.not_found, offline -> -32011 node.offline
+// (PROTOCOL.md §7.2). The final -32012 node.busy return is currently
+// unreachable: the only gate is tryAcquire, which refcounts concurrent
+// commands and only fails for missing/offline/unknown nodes. It is kept
+// defensively in case tryAcquire ever becomes exclusive again.
 func (h *Hub) nodeBusyOrOfflineCode(id string) (int, string, map[string]any) {
 	st, ok := h.nodes.status(id)
 	if !ok {
@@ -480,7 +497,12 @@ func (h *Hub) execNodeCommand(ctx context.Context, cmd *Command) (string, any, *
 	case "fail":
 		return cmdFailed, nil, jsonrpc.NewError(simulatorFailureCode, "simulated failure", nil)
 	case "sleep":
-		ms := intParam(cmd.Params["ms"], 0)
+		// msParam clamps to [0, maxMs]: a raw int64 ms would overflow
+		// time.Duration arithmetic and fire immediately.
+		ms, merr := msParam(cmd.Params["ms"], 0)
+		if merr != nil {
+			return cmdFailed, nil, merr
+		}
 		select {
 		case <-time.After(time.Duration(ms) * time.Millisecond):
 			return cmdSucceeded, map[string]any{"slept": ms}, nil
@@ -488,6 +510,15 @@ func (h *Hub) execNodeCommand(ctx context.Context, cmd *Command) (string, any, *
 			return h.abortedStatus(cmd), nil, nil
 		}
 	case "shell":
+		// The built-in executor is a simulator. Running host commands is an
+		// explicit operator opt-in (-allow-shell), not a default capability.
+		if !h.cfg.AllowShell {
+			return cmdFailed, nil, jsonrpc.NewError(jsonrpc.CodeFeatureDisabled,
+				"feature.disabled", map[string]any{
+					"feature": "shell",
+					"hint":    "restart hubd with -allow-shell to enable the demo shell executor",
+				})
+		}
 		return h.execShell(ctx, cmd)
 	default:
 		return cmdFailed, nil, jsonrpc.NewError(jsonrpc.CodeMethodNotFound, "method not found",
@@ -529,13 +560,23 @@ func (h *Hub) execShell(ctx context.Context, cmd *Command) (string, any, *jsonrp
 	}
 	c.Stdout = &stdout
 	c.Stderr = &stderr
+	// Bound how long Wait blocks once the context is done. Killing the direct
+	// child does not kill its grandchildren, so a script such as
+	// `sh -c "sleep 999999"` keeps the inherited stdout/stderr pipes open and
+	// would otherwise defeat the command timeout entirely.
+	c.WaitDelay = 500 * time.Millisecond
 	err := c.Run()
 	if err != nil {
-		switch {
-		case ctx.Err() == context.DeadlineExceeded:
+		// runCommand implements the deadline as context.WithCancel +
+		// time.AfterFunc(cancel), so ctx.Err() is always context.Canceled and
+		// cannot tell a timeout from an explicit cancel. abortedStatus reads
+		// the command's cancel channel, which is the authoritative
+		// discriminator: only an explicit command.cancel closes it.
+		if ctx.Err() != nil {
+			if h.abortedStatus(cmd) == cmdCancelled {
+				return cmdCancelled, nil, nil
+			}
 			return cmdTimeout, nil, jsonrpc.NewError(simulatorFailureCode, "command timeout", nil)
-		case ctx.Err() == context.Canceled:
-			return cmdCancelled, nil, nil
 		}
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {

@@ -1,5 +1,5 @@
-import { E as ErrorData, T as TransportKind, H as HubEvent } from './electron-DnDrtmgV.cjs';
-export { A as AuthResult, C as CapabilitiesResult, a as Capability, b as ClientInfo, c as Command, d as CommandBatchParams, e as CommandBatchResult, f as CommandCancelParams, g as CommandCancelResult, h as CommandSendParams, i as CommandSendResult, j as CommandSpec, k as CommandStatus, l as EventSubscribeParams, m as EventType, n as HubClient, o as HubClientOptions, L as LoginParams, M as MainBridge, N as Node, p as NodeFilter, q as NodeGetResult, r as NodeListParams, s as NodeListResult, t as NodeStatus, u as NodeSubscribeParams, P as PingResult, v as PlatformInfo, w as PreloadApi, R as RequestOptions, x as RpcId, y as RpcMessage, z as RpcNotification, B as RpcRequest, D as RpcResponse, S as SDK_VERSION, F as ServerInfo, G as SessionInfo, I as SubscribeParams, J as SubscribeResult, K as Subscription, O as Task, Q as TaskCancelParams, U as TaskCancelResult, V as TaskCreateParams, W as TaskCreateResult, X as TaskGetParams, Y as TaskGetResult, Z as TaskListParams, _ as TaskListResult, $ as TaskStatus, a0 as TaskSubscribeParams, a1 as Timestamp, a2 as UnsubscribeParams, a3 as UnsubscribeResult, a4 as createMainBridge, a5 as createPreloadAPI } from './electron-DnDrtmgV.cjs';
+import { E as ErrorData, T as TransportKind, H as HubEvent } from './electron-CXxTIFbs.cjs';
+export { A as AuthResult, C as CapabilitiesResult, a as Capability, b as ClientInfo, c as Command, d as CommandBatchParams, e as CommandBatchResult, f as CommandCancelParams, g as CommandCancelResult, h as CommandSendParams, i as CommandSendResult, j as CommandSpec, k as CommandStatus, l as EventSubscribeParams, m as EventType, n as HubClient, o as HubClientOptions, L as LoginParams, M as MainBridge, N as Node, p as NodeFilter, q as NodeGetResult, r as NodeListParams, s as NodeListResult, t as NodeStatus, u as NodeSubscribeParams, P as PingResult, v as PlatformInfo, w as PreloadApi, R as RequestOptions, x as RpcId, y as RpcMessage, z as RpcNotification, B as RpcRequest, D as RpcResponse, S as SDK_VERSION, F as ServerInfo, G as SessionInfo, I as SubscribeParams, J as SubscribeResult, K as Subscription, O as Task, Q as TaskCancelParams, U as TaskCancelResult, V as TaskCreateParams, W as TaskCreateResult, X as TaskGetParams, Y as TaskGetResult, Z as TaskListParams, _ as TaskListResult, $ as TaskStatus, a0 as TaskSubscribeParams, a1 as Timestamp, a2 as UnsubscribeParams, a3 as UnsubscribeResult, a4 as createMainBridge, a5 as createPreloadAPI } from './electron-CXxTIFbs.cjs';
 
 /**
  * HubError — the single error type raised by the SDK.
@@ -44,6 +44,9 @@ declare const HUB_CODES: {
     readonly EVENT_TYPE_NOT_SUPPORTED: -32031;
     readonly FEATURE_DISABLED: -32040;
     readonly RATE_LIMITED: -32041;
+    readonly SEAT_NOT_FOUND: -32050;
+    readonly SEAT_OCCUPIED: -32051;
+    readonly SEAT_EXPECT_MISMATCH: -32052;
 };
 /**
  * SDK-local error codes (positive; never sent to the server, never collide

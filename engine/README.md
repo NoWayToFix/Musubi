@@ -44,6 +44,7 @@ GOOS=windows GOARCH=amd64 go build -o hubd.exe ./cmd/hubd
 ./hubd -addr :8080 -auth token -token secret   # 静态 Token 模式
 ./hubd -addr :8080 -auth basic -user admin -pass pw
 ./hubd -verbose                                # 开启 debug 日志
+./hubd -addr :8080 -demo 3 -allow-shell        # 显式开启主机 shell 执行器
 ```
 
 CLI 参数：
@@ -54,7 +55,9 @@ CLI 参数：
 | `-auth` | `none` | `none` / `token` / `basic` |
 | `-token` | | token 模式静态密钥 |
 | `-user` / `-pass` | | basic 模式账号口令 |
-| `-demo` | `3` | 模拟节点数 `n-1..n-N`（始终在线，支持 echo/fail/sleep/shell） |
+| `-demo` | `3` | 模拟节点数 `n-1..n-N`（始终在线，支持 echo/fail/sleep；`shell` 需 `-allow-shell`） |
+| `-allow-shell` | `false` | 允许内置模拟执行器执行主机 shell 命令（默认关闭） |
+| `-allow-origin` | | 逗号分隔的额外浏览器来源白名单，用于 `/v1/rpc`、`/v1/ws`、`/v1/register` |
 | `-verbose` | `false` | 输出 debug 日志（log/slog） |
 
 ## 端点（PROTOCOL.md §6）
@@ -81,11 +84,12 @@ CLI 参数：
 - **模拟执行器**：引擎内置节点方法执行器（`echo` 返回 params、`fail` 返回 `-32000 simulated failure`、`sleep` 睡眠 `params.ms` 毫秒、`shell` 用 `os/exec` 执行 `params.cmd`（字符串→`sh -c`，数组→argv），超时/取消 kill 进程）。执行期间节点置 `busy`，结束后恢复 `online`。
 - **异步指令**：`command.send` 返回 `accepted`，随后 `running → succeeded/failed/timeout`（默认超时 30s，`timeout:0` 不限）；`command.batch` 同步逐个下发，失败者错误内嵌于 `command.error`。
 - **幂等**：`idempotency_key` 5 分钟 TTL 内重复调用返回首次结果（command 级与 batch 级）。
-- **认证**：`token`/`basic` 模式需先 `auth.login` 取得 access_token（TTL 1h，可 refresh），之后经 `Authorization: Bearer` 或 `params.auth_token` 携带；`none` 模式直接匿名访问（也可 login 换匿名 token）。HTTP 层额外接受 `Authorization: Basic`（仅 basic 模式）。
+- **认证**：`token`/`basic` 模式需先 `auth.login` 取得 access_token（TTL 1h，可 refresh），之后经 `Authorization: Bearer` 或 `params.auth_token` 携带；`auth.refresh` 同时签发**新的 access_token 与新的 refresh_token**，旧 token 对原子失效（不可重放）；`auth.logout` 吊销当前会话 token 及其 refresh token；`none` 模式直接匿名访问（也可 login 换匿名 token）。HTTP 层额外接受 `Authorization: Basic`（仅 basic 模式）。
+- **所有权与入参校验**：订阅/指令/任务资源记录所有者（access_token 或 `basic:<user>`），非所有者 `event.unsubscribe` / `node.unsubscribe` / `command.cancel` / `task.cancel` → `-32004`（检查先于终态检查；匿名资源不校验）；`/v1/register` 拒绝与 demo 节点冲突的 id（`-32602`），真实节点同 id 重复注册仍为更新；`event_types` 非数组或含非字符串 → `-32602`；`timeout` / `sleep` 的 `ms` 为整数毫秒、范围 `[0, 2147483647]`（`0` = 不超时/立即，非整数 `-32602`，负值按 0）。
 - **事件**：订阅支持 `event_types`/`node_id`/`task_id` 交集过滤；未知事件类型订阅返回 `-32031`；投递走带缓冲 channel、非阻塞（满则丢弃并记日志）；WS 连接关闭时自动清理该连接创建的订阅；SSE/长轮询各自挂一个内部订阅。
 - **并发安全**：所有共享状态（节点/指令/任务/事件/认证）均以 `sync.RWMutex` 保护；列表返回快照避免响应序列化与后台执行竞争。
 
-## curl 冒烟验证
+## curl 起爆验证
 
 ```bash
 # 1. 发现 + 健康检查（无需认证）

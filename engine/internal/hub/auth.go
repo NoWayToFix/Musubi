@@ -155,7 +155,10 @@ func (a *authManager) issue(user string, anonymous bool) (map[string]any, *jsonr
 	}, nil
 }
 
-// refresh implements auth.refresh: rotates the access token's expiry.
+// refresh implements auth.refresh: it validates the refresh token and issues
+// a NEW access token AND a NEW refresh token, atomically invalidating the old
+// pair (PROTOCOL.md §5: "同上（新 access_token）"). Rotating both halves means a
+// leaked refresh token cannot be replayed forever.
 func (a *authManager) refresh(refreshToken string) (map[string]any, *jsonrpc.Error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -163,16 +166,36 @@ func (a *authManager) refresh(refreshToken string) (map[string]any, *jsonrpc.Err
 	if !ok {
 		return nil, jsonrpc.NewError(jsonrpc.CodeAuthInvalid, "auth.invalid", map[string]any{})
 	}
-	t, ok := a.tokens[access]
+	old, ok := a.tokens[access]
 	if !ok {
 		return nil, jsonrpc.NewError(jsonrpc.CodeAuthInvalid, "auth.invalid", map[string]any{})
 	}
-	t.ExpiresAt = time.Now().Add(authTokenTTL)
+	newAccess, err := randomToken()
+	if err != nil {
+		return nil, jsonrpc.NewError(jsonrpc.CodeInternalError, "internal error", nil)
+	}
+	newRefresh, err := randomToken()
+	if err != nil {
+		return nil, jsonrpc.NewError(jsonrpc.CodeInternalError, "internal error", nil)
+	}
+	// Swap the pair under one lock: the old access and refresh tokens become
+	// unusable at the same instant the new pair becomes valid.
+	nt := &Token{
+		AccessToken:  newAccess,
+		RefreshToken: newRefresh,
+		ExpiresAt:    time.Now().Add(authTokenTTL),
+		Anonymous:    old.Anonymous,
+		User:         old.User,
+	}
+	delete(a.tokens, access)
+	delete(a.refreshTokens, refreshToken)
+	a.tokens[newAccess] = nt
+	a.refreshTokens[newRefresh] = newAccess
 	return map[string]any{
-		"access_token":  access,
+		"access_token":  newAccess,
 		"token_type":    "bearer",
 		"expires_in":    authLoginTTLMsg,
-		"refresh_token": refreshToken,
+		"refresh_token": newRefresh,
 	}, nil
 }
 

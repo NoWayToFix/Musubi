@@ -89,9 +89,13 @@ Fallback order is `ws → sse → poll`, chosen by `transportOrder ∩ server_in
 
 - `open()` / `close()` — connect & negotiate (`engine.info`), teardown
 - `request(method, params, opts?)` — raw JSON-RPC (id auto-increment, timeout,
-  optional batch; offline queue; -32003 auth-expired auto refresh + 1 retry)
+  optional batch; offline queue; on `-32003`/`-32002` auto-recovers via
+  `auth.refresh` — falling back to re-login — and retries the call once)
 - `info(clientInfo?)`, `ping()`, `capabilities()`
-- `login()` / `refresh()` / `logout()`
+- `login()` / `refresh()` / `logout()` — `refresh()` rotates the stored pair
+  (the engine returns a NEW access_token AND a NEW refresh_token and invalidates
+  the old pair; a rejected refresh token is dropped so the next attempt
+  re-logins instead of replaying a dead token)
 - `nodeList(filter?, limit?, offset?)`, `nodeGet(id)`, `nodeSubscribe(id?)`,
   `nodeUnsubscribe(subId)`
 - `commandSend(spec)`, `commandBatch(specs, key?)`, `commandCancel(id)`
@@ -101,6 +105,25 @@ Fallback order is `ws → sse → poll`, chosen by `transportOrder ∩ server_in
 - `subscribeEvents(filters?)` → `Subscription` (auto-restored after reconnect),
   `onNode(nodeId?)`, `onTask(taskId?)`
 - Events: `client.on(type | '*', handler)` / `off(type, handler)`
+
+## Subscriptions & events
+
+- `subscribeEvents()` performs a real `event.subscribe` round-trip and is
+  auto-restored after a reconnect. The returned `Subscription.subscription_id`
+  is a live getter: it stays current across reconnects (a restored subscription
+  gets a new server id), and `unsubscribe()` always targets the *current* id.
+- Subscriptions created before `open()` (or while reconnecting) are queued and
+  replayed once connected; calling `unsubscribe()` before the subscribe
+  resolves tears the subscription down instead of leaking it.
+- Dispatch is by **exact `event.type` or `'*'`** (all events, including unknown
+  types) — there is no generic `"event"` type.
+- Over SSE and long-poll the server broadcasts the full event stream, so when
+  subscriptions exist the client enforces their filters locally: events
+  matching no active subscription are dropped. With no subscriptions, `on()`
+  handlers see the unfiltered broadcast. Over WS the server filters
+  per-subscription already.
+- Events are deduplicated by `event.id` (sliding window `dedupeWindow`,
+  default 5000).
 
 ## Electron
 

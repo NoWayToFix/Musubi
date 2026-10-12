@@ -1,8 +1,11 @@
 """musubi-hub-sdk: Python SDK for the Control Hub (JSON-RPC 2.0).
 
-Zero third-party dependencies by default (urllib.request only). If the
-optional ``websocket-client`` package is installed and ``transport="ws"`` is
-requested, a WebSocket transport is used; otherwise it degrades gracefully.
+Zero third-party dependencies by default (urllib.request only). Events are
+delivered over SSE (or long-poll when the server does not advertise SSE),
+writes made while disconnected are queued and replayed on reconnect
+(PROTOCOL.md §6.2). If the optional ``websocket-client`` package is installed
+and the server advertises it, calls may use the WebSocket transport;
+otherwise they degrade gracefully to HTTP.
 
 Contract anchor: docs/PROTOCOL.md (see repository root).
 """

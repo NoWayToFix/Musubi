@@ -419,15 +419,23 @@ func (a *app) moveSel(k key) {
 }
 
 // visibleLocked keeps the selection inside the visible window of the pane.
+// The height mirrors what frame/box actually render: body = term lines minus
+// header/input/status/padding, then minus the box title and bottom border.
 // Caller must hold a.mu.
 func (a *app) visibleLocked(p int) {
 	_, h := termSize()
-	h -= 4
-	if a.pane == paneNodes && h > 6 {
-		h /= 2 // nodes pane is half height in the 3-column layout
+	if h < 10 {
+		h = 10
 	}
-	if h < 3 {
-		h = 3
+	body := h - 4
+	h = body - 2
+	if a.pane == paneNodes {
+		// Nodes pane is half height in the 3-column layout (conservative in
+		// single-pane mode, where it is full height).
+		h = body/2 - 2
+	}
+	if h < 1 {
+		h = 1
 	}
 	if a.scroll[p] > a.sel[p] {
 		a.scroll[p] = a.sel[p]

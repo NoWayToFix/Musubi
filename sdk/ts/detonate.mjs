@@ -6,7 +6,7 @@
  * ping, capabilities, auth.login, node.list, event subscription + dedupe,
  * offline queueing, and typed command/task methods.
  *
- * Run: node dist/smoke.mjs
+ * Run: node dist/detonate.mjs
  */
 import { WebSocketServer } from 'ws';
 import { createServer } from 'node:http';
@@ -23,6 +23,21 @@ const nodes = [
   { id: 'n-1', name: 'worker-1', status: 'online', tags: ['linux'], last_seen: new Date().toISOString() },
   { id: 'n-2', name: 'worker-2', status: 'busy', tags: ['mac'], last_seen: new Date().toISOString() }
 ];
+
+// Mock state observed by the tests.
+const mockState = {
+  subscribed: [], // { subscription_id, params } from event.subscribe
+  unsubscribed: [], // subscription_id values from event.unsubscribe
+  sseClients: new Set(), // open /v1/events responses (for _mock.push_event)
+  pollQueue: [], // events pending delivery on the next /v1/poll
+  authFailFired: false // one-shot -32003 on node.list (auth retry test)
+};
+
+function broadcastEvent(ev) {
+  const frame = `data: ${JSON.stringify({ jsonrpc: '2.0', method: 'event', params: { subscription_id: 'broadcast', event: ev } })}\n\n`;
+  for (const res of mockState.sseClients) res.write(frame);
+  mockState.pollQueue.push(ev);
+}
 
 function rpcResult(id, result) {
   return JSON.stringify({ jsonrpc: '2.0', id, result });
@@ -75,7 +90,20 @@ function handleMethod(id, method, params = {}, auth) {
         expires_in: 3600,
         refresh_token: 'ref-' + Math.random().toString(36).slice(2)
       });
+    case 'auth.refresh':
+      // NEW engine semantics: refresh rotates BOTH tokens and invalidates the
+      // old pair.
+      return rpcResult(id, {
+        access_token: 'tok-' + Math.random().toString(36).slice(2),
+        token_type: 'bearer',
+        expires_in: 3600,
+        refresh_token: 'ref-' + Math.random().toString(36).slice(2)
+      });
     case 'node.list':
+      if (params.__fail_auth && !mockState.authFailFired) {
+        mockState.authFailFired = true;
+        return rpcError(id, -32003, 'auth.expired', { retry_after: 0 });
+      }
       return rpcResult(id, { nodes, total: nodes.length });
     case 'command.send':
       return rpcResult(id, {
@@ -100,12 +128,22 @@ function handleMethod(id, method, params = {}, auth) {
           created_at: new Date().toISOString()
         }
       });
-    case 'event.subscribe':
-      return rpcResult(id, { subscription_id: 'sub-' + Math.random().toString(36).slice(2) });
+    case 'event.subscribe': {
+      const subscription_id = 'sub-' + Math.random().toString(36).slice(2);
+      mockState.subscribed.push({ subscription_id, params });
+      return rpcResult(id, { subscription_id });
+    }
     case 'event.unsubscribe':
+      mockState.unsubscribed.push(params.subscription_id);
+      return rpcResult(id, {});
     case 'node.unsubscribe':
     case 'auth.logout':
       return rpcResult(id, {});
+    case '_mock.push_event':
+      // Broadcast an arbitrary event over SSE + poll (transport-level
+      // broadcast, like the real engine: no server-side filtering).
+      broadcastEvent(params.event);
+      return rpcResult(id, { ok: true });
     default:
       return rpcError(id, -32601, `method not found: ${method}`);
   }
@@ -175,6 +213,7 @@ const http = createServer(async (req, res) => {
       Connection: 'keep-alive'
     });
     res.write('retry: 2000\n\n');
+    mockState.sseClients.add(res);
     // Send a couple of demo events, then keep the stream open.
     const ev1 = { id: 'ev-sse-1', type: 'node.registered', time: new Date().toISOString(), node_id: 'n-3', data: { status: 'online' } };
     res.write(`data: ${JSON.stringify({ jsonrpc: '2.0', method: 'event', params: { subscription_id: 'sse', event: ev1 } })}\n\n`);
@@ -182,12 +221,15 @@ const http = createServer(async (req, res) => {
     res.write(`data: ${JSON.stringify({ jsonrpc: '2.0', method: 'event', params: { subscription_id: 'sse', event: ev2 } })}\n\n`);
     // Keep alive
     const keep = setInterval(() => res.write(': keepalive\n\n'), 30000);
-    req.on('close', () => clearInterval(keep));
+    req.on('close', () => {
+      clearInterval(keep);
+      mockState.sseClients.delete(res);
+    });
     return;
   }
   if (url.pathname === '/v1/poll') {
     const cursor = parseInt(url.searchParams.get('cursor') ?? '0', 10);
-    const events = [];
+    const events = mockState.pollQueue.splice(0);
     if (cursor < 1) {
       events.push({ id: 'ev-poll-1', type: 'node.updated', time: new Date().toISOString(), node_id: 'n-1', data: { status: 'busy' } });
     }
@@ -333,13 +375,115 @@ async function main() {
     check('protocol mismatch throws HubError -32005', e?.name === 'HubError' && e?.code === -32005);
   }
 
-  console.log(failures === 0 ? '\nALL SMOKE TESTS PASSED' : `\n${failures} SMOKE TEST(S) FAILED`);
+  // 6. Auth retry: -32003 triggers refresh (token rotation) + one retry.
+  //     Assumes the NEW engine semantics: auth.refresh returns a NEW
+  //     access_token AND refresh_token and invalidates the old pair.
+  console.log('--- auth retry (refresh) ---');
+  const authClient = new HubClient({ url: BASE, credentials: { token: 'x' }, autoReconnect: false });
+  await authClient.open();
+  const tokBefore = authClient.accessToken;
+  const rtBefore = authClient.refreshToken;
+  const nlAuth = await authClient.request('node.list', { __fail_auth: true });
+  check('auth retry: request retried after refresh', nlAuth.total === 2);
+  check(
+    'auth retry: access + refresh tokens rotated',
+    authClient.accessToken !== tokBefore && authClient.refreshToken !== rtBefore
+  );
+  await authClient.close();
+
+  // 7. onNode/onTask unsubscribe must actually remove the server subscription
+  //     (regression: lookup key never matched, event.unsubscribe never sent).
+  console.log('--- onNode/onTask unsubscribe ---');
+  const subClient = new HubClient({ url: BASE, token: 't', transportOrder: ['http'], autoReconnect: false });
+  await subClient.open();
+  const subCountBefore = mockState.subscribed.length;
+  const stopNode = subClient.onNode('n-1');
+  const stopTask = subClient.onTask('t-1');
+  await wait(300);
+  const newSubIds = mockState.subscribed.slice(subCountBefore).map((s) => s.subscription_id);
+  check('onNode/onTask created 2 server subscriptions', newSubIds.length === 2);
+  stopNode();
+  stopTask();
+  await wait(300);
+  check(
+    'onNode/onTask unsubscribe reached the server',
+    newSubIds.length === 2 && newSubIds.every((sid) => mockState.unsubscribed.includes(sid))
+  );
+  await subClient.close();
+
+  // 8. onNode before open(): must connect first instead of silently failing.
+  console.log('--- onNode before open ---');
+  const earlyClient = new HubClient({ url: BASE, token: 't', transportOrder: ['http'], autoReconnect: false });
+  const subCountEarly = mockState.subscribed.length;
+  const stopEarly = earlyClient.onNode('n-1');
+  await earlyClient.open();
+  await wait(300);
+  check(
+    'onNode before open still subscribes',
+    mockState.subscribed.length === subCountEarly + 1
+  );
+  stopEarly();
+  await wait(200);
+  await earlyClient.close();
+
+  // 9. Client-side filter enforcement over SSE/poll (the engine broadcasts all
+  //     events on /v1/events and /v1/poll; filters must be applied locally).
+  console.log('--- sse/poll client-side filtering ---');
+  const filterClient = new HubClient({ url: BASE, token: 't', transportOrder: ['http'], autoReconnect: false });
+  const nodeEvents = [];
+  const taskEvents = [];
+  filterClient.on('node.status.changed', (ev) => nodeEvents.push(ev));
+  filterClient.on('task.progress', (ev) => taskEvents.push(ev));
+  await filterClient.open();
+  const stopFilter = filterClient.onNode('n-1');
+  await wait(300); // subscription active ⇒ filtering kicks in
+  await filterClient.request('_mock.push_event', { event: { id: 'ev-f-1', type: 'node.status.changed', time: new Date().toISOString(), node_id: 'n-1', data: {} } });
+  await filterClient.request('_mock.push_event', { event: { id: 'ev-f-2', type: 'node.status.changed', time: new Date().toISOString(), node_id: 'n-2', data: {} } });
+  await filterClient.request('_mock.push_event', { event: { id: 'ev-f-3', type: 'task.progress', time: new Date().toISOString(), task_id: 't-5', data: {} } });
+  await wait(300);
+  check('sse filter: matching node event delivered', nodeEvents.some((e) => e.id === 'ev-f-1'));
+  check('sse filter: non-matching node event dropped', !nodeEvents.some((e) => e.id === 'ev-f-2'));
+  check('sse filter: task event dropped under node filter', !taskEvents.some((e) => e.id === 'ev-f-3'));
+  stopFilter();
+  await wait(200);
+  await filterClient.request('_mock.push_event', { event: { id: 'ev-f-4', type: 'task.progress', time: new Date().toISOString(), task_id: 't-5', data: {} } });
+  await wait(300);
+  check('sse: no subscriptions ⇒ broadcast delivered unfiltered', taskEvents.some((e) => e.id === 'ev-f-4'));
+  await filterClient.close();
+
+  const pollFilterClient = new HubClient({ url: BASE, token: 't', transportOrder: ['poll'], autoReconnect: false });
+  const pollNodeEvents = [];
+  pollFilterClient.on('node.status.changed', (ev) => pollNodeEvents.push(ev));
+  await pollFilterClient.open();
+  const stopPollFilter = pollFilterClient.onNode('n-1');
+  await wait(300);
+  await pollFilterClient.request('_mock.push_event', { event: { id: 'ev-pf-1', type: 'node.status.changed', time: new Date().toISOString(), node_id: 'n-1', data: {} } });
+  await pollFilterClient.request('_mock.push_event', { event: { id: 'ev-pf-2', type: 'node.status.changed', time: new Date().toISOString(), node_id: 'n-2', data: {} } });
+  await wait(500);
+  check('poll filter: matching node event delivered', pollNodeEvents.some((e) => e.id === 'ev-pf-1'));
+  check('poll filter: non-matching node event dropped', !pollNodeEvents.some((e) => e.id === 'ev-pf-2'));
+  stopPollFilter();
+  await pollFilterClient.close();
+
+  // 10. Negative dedupeWindow must not hang (regression: infinite loop).
+  console.log('--- negative dedupeWindow ---');
+  const negClient = new HubClient({ url: BASE, token: 't', transportOrder: ['http'], autoReconnect: false, dedupeWindow: -5 });
+  const negEvents = [];
+  negClient.on('node.status.changed', (ev) => negEvents.push(ev));
+  await negClient.open();
+  await negClient.request('_mock.push_event', { event: { id: 'ev-neg-1', type: 'node.status.changed', time: new Date().toISOString(), node_id: 'n-1', data: {} } });
+  await negClient.request('_mock.push_event', { event: { id: 'ev-neg-2', type: 'node.status.changed', time: new Date().toISOString(), node_id: 'n-1', data: {} } });
+  await wait(300);
+  check('negative dedupeWindow: no hang, both events delivered', negEvents.length === 2);
+  await negClient.close();
+
+  console.log(failures === 0 ? '\nALL DETONATION TESTS PASSED' : `\n${failures} DETONATION TEST(S) FAILED`);
   process.exit(failures === 0 ? 0 : 1);
 }
 
 main()
   .catch((err) => {
-    console.error('smoke crashed:', err);
+    console.error('detonation crashed:', err);
     process.exit(1);
   })
   .finally(() => {

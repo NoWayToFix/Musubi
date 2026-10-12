@@ -38,7 +38,7 @@
   "scripts": {
     "build": "tsup",
     "typecheck": "tsc --noEmit",
-    "test": "node smoke.mjs"
+    "test": "node detonate.mjs"
   },
   "devDependencies": {
     "typescript": "^5.4.0",

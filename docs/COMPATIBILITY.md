@@ -9,12 +9,14 @@
 
 | 语言 | SDK 状态 | 最小版本 | JSON-RPC over WS | over HTTP | 事件订阅 | 断线重连/退避 | 离线队列 | 说明 |
 |---|---|---|---|---|---|---|---|---|
-| Go | ✅ `sdk/go` | 1.20+，无 CGO | ✅ 内置极简 WS 客户端 | ✅ | ✅ 轮询+WS | ✅ | ✅ | 单文件依赖，仅标准库 |
+| Go | ✅ `sdk/go` | 1.20+，无 CGO | ✅ 内置极简 WS 客户端 | ✅ | ✅ 轮询+WS+SSE | ✅ | ✅ | 单文件依赖，仅标准库 |
 | TypeScript | ✅ `sdk/ts` | Node ≥ 18 / 现代浏览器 | ✅ 自动适配（Node 原生 WebSocket / 浏览器 WebSocket / 可选 `ws` 包） | ✅ fetch | ✅ SSE+WS | ✅ | ✅ | 同构：ESM/CJS/UMD 三构建 |
 | JavaScript | ✅ 同 TS SDK | Node ≥ 18 | ✅ | ✅ | ✅ | ✅ | ✅ | 消费 `dist/` 产物 |
-| Python | ✅ `sdk/python` | 3.8+ | 🟡 安装 `websocket-client` 后可用 | ✅ urllib（0 依赖） | ✅ 长轮询+SSE | ✅ | ✅ | 默认零第三方依赖 |
+| Python | ✅ `sdk/python` | 3.8+ | 🟡 安装 `websocket-client` 后可用 | ✅ urllib（0 依赖） | ✅ SSE（优先）+长轮询 | ✅ | ✅ | 默认零第三方依赖 |
 | Rust / C# / Java / C/C++ | ⭕ | — | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 按 `docs/PROTOCOL.md` + `schema/` 自行实现（契约已稳定） |
 | 任何语言 | ✅ | — | 🟡 | ✅ | 🟡 | 🟡 | 🟡 | 最小接入：HTTP POST `/v1/rpc` + 轮询 `/v1/poll`，仅需 JSON |
+
+> 离线队列：三个官方 SDK 均默认开启（内存 FIFO，上限 1000，重连后按序重放）；队列排除 `engine.*` / `auth.*`（Python SDK 额外排除 `event.*`），详见 PROTOCOL.md §6.2。
 
 ## 2. 运行时矩阵（TS SDK 同构性）
 
@@ -79,7 +81,18 @@
 | 无 root / 只读文件系统 | ✅ | 默认纯内存运行，不落盘 |
 | 反向代理 / TLS | ✅ | 可置于 nginx/网关后；SDK 支持代理与自签名 CA |
 
-## 7. 协议版本支持矩阵
+## 7. 能力域矩阵（引擎内置能力）
+
+| 能力 | 引擎 | Go SDK | TS SDK | Python SDK | 说明 |
+|---|---|---|---|---|---|
+| `node.registry` | ✅ | ✅ | ✅ | ✅ | 节点注册/心跳/注销 |
+| `command.exec` | ✅ | ✅ | ✅ | ✅ | 指令下发/取消 |
+| `task.flow` | ✅ | ✅ | ✅ | ✅ | 任务编排/进度 |
+| `event.stream` | ✅ | ✅ | ✅ | ✅ | 事件订阅/推送 |
+| `auth.token` | ✅ | ✅ | ✅ | ✅ | 认证/刷新/注销 |
+| `seat.registry` | ✅ | ✅ | ✅ | ✅ | 席位（PROTOCOL.md §4.7）：常席/虚席、补席/退席，可拓展性单元 |
+
+## 8. 协议版本支持矩阵
 
 | 协议版本 | 引擎 | Go SDK | TS SDK | Python SDK | 说明 |
 |---|---|---|---|---|---|
@@ -89,7 +102,7 @@
 
 协商规则：取双方版本交集最高值；无交集 → `-32005`。SDK 固定声明 `protocol_versions: ["1.0"]`，对未知字段一律忽略 → **向前兼容**；引擎忽略未知请求字段 → **向后兼容**。
 
-## 8. 认证 / 安全矩阵
+## 9. 认证 / 安全矩阵
 
 | 模式 | 引擎 | 客户端支持 | 说明 |
 |---|---|---|---|
@@ -99,12 +112,12 @@
 | mTLS | 🟡 反向代理层 | 🟡 `ca`/证书配置 | 走网关 |
 | OAuth2 | 🟡 Auth 接口插件 | 🟡 | 预留 |
 
-## 9. 一致性测试矩阵（tests/）
+## 10. 一致性测试矩阵（tests/）
 
 | 测试 | 覆盖 | 语言 |
 |---|---|---|
 | 契约用例（JSON 驱动） | 全部方法、错误码、事件、协商 | 语言无关（`tests/contract/cases/*.json`） |
 | 多语言一致性 | 同一用例集跑 Go/TS/Python SDK，比对结果 | Go + Node + Python runner |
-| 兼容性矩阵冒烟 | 传输降级、未知字段忽略、旧事件忽略、断线重连 | 引擎 + TS SDK |
+| 兼容性矩阵起爆 | 传输降级、未知字段忽略、旧事件忽略、断线重连 | 引擎 + TS SDK |
 
 > 说明：矩阵中 🟡/⭕ 项不影响默认"极致兼容"承诺——所有未实现项都可通过契约（JSON + WS/HTTP）接入，或通过已定义的可插拔接口（Transport / Encoder / Auth）启用。

@@ -34,7 +34,10 @@
         "subscription_not_found": { "const": -32030 },
         "event_type_not_supported": { "const": -32031 },
         "feature_disabled": { "const": -32040 },
-        "rate_limited": { "const": -32041 }
+        "rate_limited": { "const": -32041 },
+        "seat_not_found": { "const": -32050 },
+        "seat_occupied": { "const": -32051 },
+        "seat_expect_mismatch": { "const": -32052 }
       }
     }
   }

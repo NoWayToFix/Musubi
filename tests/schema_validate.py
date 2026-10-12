@@ -31,11 +31,58 @@ def rpc(url, method, params=None, token=None):
         return json.loads(resp.read().decode())
 
 
+def command_result_error_contract(cmd):
+    """PROTOCOL §4.2：result 与 error 互斥，且与 status 一一对应。
+
+    注意：引擎序列化 result/error 时不带 omitempty —— 两个键**始终存在**
+    （缺省时为 null），因此必须断言「值非空」，而不是「键存在」。
+
+    succeeded            → result 非空 且 error 为空
+    failed               → error 非空 且 result 为空
+    cancelled / timeout  → 两者均为空（终态但不属于成功/失败产物）
+    pending/accepted/running → 两者均为空（尚未产生终态产物）
+    """
+    status = cmd.get("status")
+    result = cmd.get("result")
+    error = cmd.get("error")
+    if status == "succeeded":
+        return result is not None and error is None
+    if status == "failed":
+        return error is not None and result is None
+    if status in ("pending", "accepted", "running", "cancelled", "timeout"):
+        return result is None and error is None
+    return False  # 未知 status 一律拒绝
+
+
+def _selftest_result_error_contract():
+    """变异体自检：证明 command_result_error_contract 真的能失败。
+
+    防止再次出现「永真断言」——下列损坏的响应全部必须被拒绝。
+    """
+    broken = [
+        {"status": "succeeded", "result": None, "error": None},               # 成功却无 result
+        {"status": "succeeded", "result": {"text": "x"}, "error": {"code": -32000, "message": "e"}},  # 成功却带 error
+        {"status": "failed", "result": {"text": "x"}, "error": None},         # 失败却带 result
+        {"status": "failed", "result": None, "error": None},                  # 失败却无 error
+        {"status": "accepted", "result": {"text": "x"}, "error": None},       # 未终态却带 result
+        {"status": "accepted", "result": None, "error": {"code": -32000, "message": "e"}},  # 未终态却带 error
+        {"status": "cancelled", "result": {"text": "x"}, "error": None},      # cancelled 不应带 result
+        {"status": "timeout", "result": None, "error": {"code": -32000, "message": "e"}},   # timeout 不应带 error
+        {"status": "future-status", "result": None, "error": None},           # 未知 status
+    ]
+    for f in broken:
+        assert not command_result_error_contract(f), "变异体未被拒绝: %r" % (f,)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", default="http://127.0.0.1:8080")
     args = ap.parse_args()
     url = args.url.rstrip("/")
+
+    # 先自证断言本身可失败（否则后面的在线断言没有意义）
+    _selftest_result_error_contract()
+    print("PASS 自检：result/error 契约断言可拒绝变异体")
 
     # --- engine.info ---
     r = rpc(url, "engine.info", {"client_info": {"protocol_versions": ["1.0"]}})
@@ -61,8 +108,21 @@ def main():
     r = rpc(url, "command.send", {"node_id": "n-1", "method": "echo", "params": {"text": "x"}})
     cmd = r["result"]["command"]
     check("command.status枚举", cmd["status"] in ("pending", "accepted", "running", "succeeded", "failed", "cancelled", "timeout"))
-    check("command.result与error互斥", ("result" in cmd) != ("error" in cmd) or cmd.get("status") in ("pending", "accepted", "running"))
+    check("command.result与error契约(按status)", command_result_error_contract(cmd),
+          repr({"status": cmd.get("status"), "result": cmd.get("result"), "error": cmd.get("error")}))
     check("command 时间戳", cmd["created_at"].endswith("Z"))
+
+    # --- command.batch（同步终态：succeeded + failed 混合，覆盖 §4.2 终态分支） ---
+    r = rpc(url, "command.batch", {"commands": [
+        {"node_id": "n-1", "method": "echo", "params": {"text": "x"}},
+        {"node_id": "n-2", "method": "fail"},
+    ]})
+    cmds = r["result"]["commands"]
+    check("command.batch 终态 [succeeded, failed]",
+          [c.get("status") for c in cmds] == ["succeeded", "failed"], repr(cmds))
+    check("command.result与error契约(终态混合)",
+          all(command_result_error_contract(c) for c in cmds),
+          repr([(c.get("status"), c.get("result"), c.get("error")) for c in cmds]))
 
     # --- task.create ---
     r = rpc(url, "task.create", {"name": "s", "commands": [{"node_id": "n-1", "method": "echo"}]})

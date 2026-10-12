@@ -20,6 +20,11 @@ import type {
   PingResult,
   PlatformInfo,
   RequestOptions,
+  SeatCreateParams,
+  SeatFilter,
+  SeatListParams,
+  SeatListResult,
+  SeatResult,
   ServerInfo,
   SubscribeParams,
   SubscribeResult,
@@ -61,9 +66,12 @@ interface QueuedRequest {
 }
 
 interface ActiveSub {
-  key: string;
   filters: SubscribeParams;
   serverId?: string;
+  /** Initial event.subscribe still queued/in flight (skipped during restore). */
+  pending: boolean;
+  /** Set once unsubscribe() ran; must never be re-registered or restored. */
+  cancelled: boolean;
 }
 
 /**
@@ -126,7 +134,12 @@ export class HubClient {
       queueOffline: options.queueOffline ?? true,
       requestTimeoutMs: options.requestTimeoutMs ?? 30_000,
       pingIntervalMs: options.pingIntervalMs ?? 30_000,
-      dedupeWindow: options.dedupeWindow ?? 5000,
+      // Clamp to >= 0: a negative window previously drove dedupeEvent into a
+      // non-terminating loop. Non-finite values fall back to the default.
+      dedupeWindow:
+        typeof options.dedupeWindow === 'number' && Number.isFinite(options.dedupeWindow)
+          ? Math.max(0, Math.floor(options.dedupeWindow))
+          : 5000,
       batch: options.batch ?? false,
       proxy: options.proxy,
       ca: options.ca,
@@ -505,30 +518,42 @@ export class HubClient {
       } catch (err) {
         const isAuth =
           err instanceof HubError && (err.code === HUB_CODES.AUTH_EXPIRED || err.code === HUB_CODES.AUTH_INVALID);
-        if (isAuth && attempts === 0) {
+        // auth.* calls (login/refresh themselves) are never retried: a failed
+        // re-auth must surface to the caller, not recurse.
+        if (isAuth && attempts === 0 && !method.startsWith('auth.')) {
           attempts += 1;
-          const tokenBefore = this.accessToken;
-          if (err instanceof HubError && err.code === HUB_CODES.AUTH_EXPIRED && this.refreshToken) {
-            try {
-              await this.refresh();
-            } catch {
-              /* fall through to re-login */
-            }
-          }
-          if (!this.accessToken && this.opts.credentials) {
-            try {
-              await this.login(this.opts.credentials);
-            } catch {
-              /* fall through */
-            }
-          }
-          if (this.accessToken && this.accessToken !== tokenBefore) continue; // retry once
-          // Nothing changed: surface the original error.
-          throw err;
+          if (await this.recoverAuth()) continue; // retry once with the new token
         }
         throw err;
       }
     }
+  }
+
+  /**
+   * Recover from an auth failure: refresh the token pair first (the engine
+   * rotates BOTH access_token and refresh_token and invalidates the old pair,
+   * so refresh() stores the new pair), then fall back to a full re-login with
+   * the configured credentials. Returns true when a fresh token is available
+   * for retrying the original request exactly once.
+   */
+  private async recoverAuth(): Promise<boolean> {
+    if (this.refreshToken) {
+      try {
+        await this.refresh();
+        return true;
+      } catch {
+        /* refresh failed: fall through to re-login */
+      }
+    }
+    if (this.opts.credentials) {
+      try {
+        await this.login(this.opts.credentials);
+        return true;
+      } catch {
+        /* fall through */
+      }
+    }
+    return false;
   }
 
   private async sendOnce<T>(
@@ -574,6 +599,17 @@ export class HubClient {
   private dispatchEvent(ev: HubEvent): void {
     // Dedupe by event.id (window dedupeWindow, default 5000).
     if (!this.dedupeEvent(ev.id)) return;
+    // SSE (/v1/events) and long-poll (/v1/poll) broadcast ALL events to every
+    // connected client regardless of subscriptions, so enforce the active
+    // subscriptions' filters client-side — the same way the Go and Python
+    // SDKs do. Over WS the server streams per-subscription events already.
+    // (No subscriptions ⇒ no filtering: on()-only usage keeps seeing the
+    // broadcast stream.)
+    const kind = this.transport?.kind;
+    if ((kind === 'http' || kind === 'poll') && this.activeSubs.length > 0) {
+      const matched = this.activeSubs.some((s) => !s.cancelled && eventMatchesFilters(s.filters, ev));
+      if (!matched) return;
+    }
     const type = ev.type ?? '';
     const handlers = this.listeners.get(type);
     if (handlers) {
@@ -602,7 +638,9 @@ export class HubClient {
     if (this.seenSet.has(id)) return false;
     this.seenSet.add(id);
     this.seenIds.push(id);
-    const window = this.opts.dedupeWindow;
+    // The window is clamped to >= 0 in the constructor, and shift() strictly
+    // decreases seenIds.length, so this loop always terminates.
+    const window = Math.max(0, this.opts.dedupeWindow);
     while (this.seenIds.length > window) {
       const old = this.seenIds.shift();
       if (old !== undefined) this.seenSet.delete(old);
@@ -620,68 +658,121 @@ export class HubClient {
    * re-established automatically after reconnects.
    */
   async subscribeEvents(filters?: SubscribeParams): Promise<Subscription> {
-    const key = JSON.stringify(filters ?? {});
-    const res = await this.eventSubscribe(filters ?? {});
-    const subscriptionId = res.subscription_id ?? '';
-    const sub: Subscription = {
-      subscription_id: subscriptionId,
+    const filtersValue = filters ?? {};
+    // Register the entry BEFORE the server round-trip so a synchronous
+    // unsubscribe() finds it even while the subscribe call is queued offline
+    // or still in flight.
+    const entry: ActiveSub = { filters: filtersValue, pending: true, cancelled: false };
+    this.activeSubs.push(entry);
+    try {
+      const res = await this.eventSubscribe(filtersValue);
+      entry.pending = false;
+      entry.serverId = res.subscription_id ?? '';
+    } catch (err) {
+      // Real failure (not offline-queued): drop the placeholder so
+      // restoreSubscriptions cannot resurrect a subscription that never was.
+      this.removeActiveSub(entry);
+      throw err;
+    }
+    if (entry.cancelled && entry.serverId) {
+      // unsubscribe() ran while the subscribe was queued/in flight: the server
+      // just registered it — tear it down again instead of leaking it.
+      void this.eventUnsubscribe(entry.serverId).catch(() => {
+        /* already gone */
+      });
+    }
+    return {
+      get subscription_id() {
+        return entry.serverId ?? '';
+      },
       unsubscribe: async () => {
-        const idx = this.activeSubs.findIndex((s) => s.key === key);
-        if (idx !== -1) this.activeSubs.splice(idx, 1);
-        if (subscriptionId) {
-          await this.eventUnsubscribe(subscriptionId).catch(() => {
+        if (entry.cancelled) return;
+        entry.cancelled = true;
+        this.removeActiveSub(entry);
+        if (entry.serverId) {
+          await this.eventUnsubscribe(entry.serverId).catch(() => {
             /* already gone */
           });
         }
       }
     };
-    this.activeSubs.push({ key, filters: filters ?? {}, serverId: subscriptionId });
-    return sub;
   }
 
   /** Convenience: subscribe to node events; returns an unsubscribe function. */
   onNode(nodeId?: string): () => void {
-    const key = JSON.stringify({ scope: 'node', node_id: nodeId });
-    void this.subscribeEvents({ node_id: nodeId }).catch(() => {
-      /* offline: will be restored on reconnect */
-    });
-    return () => {
-      const idx = this.activeSubs.findIndex((s) => s.key === key);
-      if (idx !== -1) {
-        const [sub] = this.activeSubs.splice(idx, 1);
-        if (sub.serverId) {
-          void this.eventUnsubscribe(sub.serverId).catch(() => {
-            /* noop */
-          });
-        }
-      }
-    };
+    return this.trackSubscription({ node_id: nodeId });
   }
 
   /** Convenience: subscribe to task events; returns an unsubscribe function. */
   onTask(taskId?: string): () => void {
-    const key = JSON.stringify({ scope: 'task', task_id: taskId });
-    void this.subscribeEvents({ task_id: taskId }).catch(() => {
-      /* offline: will be restored on reconnect */
-    });
+    return this.trackSubscription({ task_id: taskId });
+  }
+
+  /**
+   * Shared helper behind onNode/onTask: subscribes (possibly while offline —
+   * the request is queued and replayed on reconnect) and returns a
+   * synchronous unsubscribe function that is safe to call before the
+   * subscribe call has resolved.
+   */
+  private trackSubscription(filters: SubscribeParams): () => void {
+    let sub: Subscription | null = null;
+    let cancelled = false;
+    const subscribe = (): void => {
+      void this.subscribeEvents(filters)
+        .then((s) => {
+          if (cancelled) {
+            // unsubscribe() won the race: remove the fresh server subscription.
+            void s.unsubscribe();
+          } else {
+            sub = s;
+          }
+        })
+        .catch(() => {
+          /* subscribe failed for real; nothing to clean up */
+        });
+    };
+    if (this.state === 'new') {
+      // open() was never called: request() would reject with NOT_OPEN and the
+      // subscription would silently never exist. Connect first, then subscribe.
+      void this.open().then(subscribe, () => {
+        /* connect failed; nothing to clean up */
+      });
+    } else {
+      subscribe();
+    }
     return () => {
-      const idx = this.activeSubs.findIndex((s) => s.key === key);
-      if (idx !== -1) {
-        const [sub] = this.activeSubs.splice(idx, 1);
-        if (sub.serverId) {
-          void this.eventUnsubscribe(sub.serverId).catch(() => {
-            /* noop */
-          });
-        }
+      cancelled = true;
+      if (sub) {
+        void sub.unsubscribe().catch(() => {
+          /* noop */
+        });
       }
     };
   }
 
+  private removeActiveSub(entry: ActiveSub): void {
+    const idx = this.activeSubs.indexOf(entry);
+    if (idx !== -1) this.activeSubs.splice(idx, 1);
+  }
+
   private async restoreSubscriptions(): Promise<void> {
-    for (const sub of this.activeSubs) {
+    // Iterate a snapshot: unsubscribe() may splice entries concurrently.
+    for (const sub of [...this.activeSubs]) {
+      // Dead or still-queued subscriptions must not be resurrected here: the
+      // queued event.subscribe is replayed by flushQueue() instead.
+      if (sub.cancelled || sub.pending) continue;
       try {
         const res = await this.eventSubscribe(sub.filters);
-        sub.serverId = res.subscription_id;
+        if (sub.cancelled) {
+          // Unsubscribed while restoring: drop the fresh server subscription.
+          if (res.subscription_id) {
+            void this.eventUnsubscribe(res.subscription_id).catch(() => {
+              /* already gone */
+            });
+          }
+          continue;
+        }
+        sub.serverId = res.subscription_id ?? '';
       } catch {
         /* keep the sub for the next reconnect */
       }
@@ -715,11 +806,28 @@ export class HubClient {
   refresh(): Promise<AuthResult> {
     const rt = this.refreshToken;
     if (!rt) return Promise.reject(new HubError(SDK_CODES.AUTH_UNAVAILABLE, 'no refresh_token available'));
-    return this.request<AuthResult>('auth.refresh', { refresh_token: rt }, { noQueue: true }).then((res) => {
-      if (res?.access_token) this.accessToken = res.access_token;
-      if (res?.refresh_token) this.refreshToken = res.refresh_token;
-      return res;
-    });
+    return this.request<AuthResult>('auth.refresh', { refresh_token: rt }, { noQueue: true }).then(
+      (res) => {
+        // The engine rotates both tokens; always store the fresh pair so the
+        // next refresh uses the new refresh_token.
+        if (res?.access_token) this.accessToken = res.access_token;
+        if (res?.refresh_token) this.refreshToken = res.refresh_token;
+        return res;
+      },
+      (err) => {
+        // A rotated refresh_token is single-use: once the server rejects it
+        // with an auth error the whole pair is dead — drop it so the retry
+        // path falls back to re-login instead of replaying a dead token.
+        if (
+          err instanceof HubError &&
+          (err.code === HUB_CODES.AUTH_EXPIRED || err.code === HUB_CODES.AUTH_INVALID)
+        ) {
+          this.refreshToken = undefined;
+          this.accessToken = undefined;
+        }
+        throw err;
+      }
+    );
   }
 
   logout(): Promise<UnsubscribeResult> {
@@ -810,11 +918,53 @@ export class HubClient {
     const params: UnsubscribeParams = { subscription_id: subscriptionId };
     return this.request<UnsubscribeResult>('event.unsubscribe', params);
   }
+
+  seatList(filter?: SeatFilter, limit?: number, offset?: number): Promise<SeatListResult> {
+    const params: SeatListParams = {};
+    if (filter) params['filter'] = filter;
+    if (limit !== undefined) params['limit'] = limit;
+    if (offset !== undefined) params['offset'] = offset;
+    return this.request<SeatListResult>('seat.list', params);
+  }
+
+  seatCreate(spec: SeatCreateParams = {}): Promise<SeatResult> {
+    return this.request<SeatResult>('seat.create', spec);
+  }
+
+  seatGet(seatId: string): Promise<SeatResult> {
+    return this.request<SeatResult>('seat.get', { seat_id: seatId });
+  }
+
+  seatDelete(seatId: string): Promise<Record<string, never>> {
+    return this.request<Record<string, never>>('seat.delete', { seat_id: seatId });
+  }
+
+  seatBind(seatId: string, nodeId: string): Promise<SeatResult> {
+    return this.request<SeatResult>('seat.bind', { seat_id: seatId, node_id: nodeId });
+  }
+
+  seatUnbind(seatId: string): Promise<SeatResult> {
+    return this.request<SeatResult>('seat.unbind', { seat_id: seatId });
+  }
 }
 
 /* ------------------------------------------------------------------ */
 /* Platform detection (no node: imports — isomorphic)                 */
 /* ------------------------------------------------------------------ */
+
+/**
+ * Client-side subscription filter matching (PROTOCOL.md §5 event.subscribe):
+ * mirrors sdk/go Subscription.matches and sdk/python Subscription._matches.
+ * Empty/absent filter fields match everything.
+ */
+function eventMatchesFilters(filters: SubscribeParams, ev: HubEvent): boolean {
+  if (filters.event_types && filters.event_types.length > 0) {
+    if (!ev.type || !filters.event_types.includes(ev.type)) return false;
+  }
+  if (filters.node_id && ev.node_id !== filters.node_id) return false;
+  if (filters.task_id && ev.task_id !== filters.task_id) return false;
+  return true;
+}
 
 function detectPlatform(): PlatformInfo {
   const g = globalThis as Record<string, unknown>;

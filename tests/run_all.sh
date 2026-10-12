@@ -4,8 +4,8 @@
 #   2. 契约测试 auth=none
 #   3. 契约测试 auth=token 第二轮
 #   4. Schema 结构校验
-#   5. 多语言一致性冒烟（Python / TypeScript / Go，同一 10 步断言序列）
-#   6. 兼容性矩阵冒烟（独立端口与引擎实例）
+#   5. 多语言一致性起爆（Python / TypeScript / Go，核心场景等价覆盖）
+#   6. 兼容性矩阵起爆（独立端口与引擎实例）
 # 用法: bash tests/run_all.sh [--url :18080] [--auth none]
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -54,19 +54,19 @@ echo "== [4/6] Schema 结构校验 =="
 start_engine none
 python3 tests/schema_validate.py --url "http://$ADDR"
 
-echo "== [5/6] 多语言一致性冒烟（同一 10 步序列） =="
-python3 tests/compat/smoke_py.py --url "http://$ADDR"
+echo "== [5/6] 多语言一致性起爆（核心场景等价覆盖） =="
+python3 tests/compat/detonate_py.py --url "http://$ADDR"
 if [ -f sdk/ts/dist/index.mjs ]; then
-  HUB_URL="http://$ADDR" node tests/compat/smoke_ts.mjs
+  HUB_URL="http://$ADDR" node tests/compat/detonate_ts.mjs
 else
-  echo "  skip TS 冒烟（sdk/ts 未构建，先执行: cd sdk/ts && npm install && npm run build）"
+  echo "  skip TS 起爆（sdk/ts 未构建，先执行: cd sdk/ts && npm install && npm run build）"
 fi
-( cd tests/compat/smoke_go && HUB_URL="http://$ADDR" GOFLAGS=-mod=mod go run . )
+( cd tests/compat/detonate_go && HUB_URL="http://$ADDR" GOFLAGS=-mod=mod go run . )
 stop_engine
 trap - EXIT
 
-echo "== [6/6] 兼容性矩阵冒烟（独立端口 18081） =="
-bash tests/compat/matrix_smoke.sh
+echo "== [6/6] 兼容性矩阵起爆（独立端口 18081） =="
+bash tests/compat/matrix_detonate.sh
 
 echo
 echo "== ALL TESTS PASSED =="

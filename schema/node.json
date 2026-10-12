@@ -21,7 +21,8 @@
       "additionalProperties": true
     },
     "last_seen": { "$ref": "common.json#/definitions/timestamp" },
-    "registered_at": { "$ref": "common.json#/definitions/timestamp" }
+    "registered_at": { "$ref": "common.json#/definitions/timestamp" },
+    "seat_id": { "type": "string", "description": "Id of the seat this node occupies (PROTOCOL.md §4.7); absent/null when unseated." }
   },
   "additionalProperties": true
 }

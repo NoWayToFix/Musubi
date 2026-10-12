@@ -4,6 +4,7 @@
 // Usage:
 //
 //	hubd -addr :8080 -auth none -demo 3
+//	hubd -addr :8080 -auth none -demo 3 -allow-shell        # opt in to host shell
 //	hubd -addr :8080 -auth token -token secret -demo 3
 //	hubd -addr :8080 -auth basic -user admin -pass pw -demo 3
 package main
@@ -16,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -25,13 +27,17 @@ import (
 
 func main() {
 	var (
-		addr     = flag.String("addr", ":8080", "listen address")
-		authMode = flag.String("auth", "none", "auth mode: none | token | basic")
-		token    = flag.String("token", "", "static token (token mode)")
-		user     = flag.String("user", "", "username (basic mode)")
-		pass     = flag.String("pass", "", "password (basic mode)")
-		demo     = flag.Int("demo", 3, "number of simulated nodes n-1..n-N")
-		verbose  = flag.Bool("verbose", false, "enable debug logging")
+		addr       = flag.String("addr", ":8080", "listen address")
+		authMode   = flag.String("auth", "none", "auth mode: none | token | basic")
+		token      = flag.String("token", "", "static token (token mode)")
+		user       = flag.String("user", "", "username (basic mode)")
+		pass       = flag.String("pass", "", "password (basic mode)")
+		demo       = flag.Int("demo", 3, "number of simulated nodes n-1..n-N")
+		verbose    = flag.Bool("verbose", false, "enable debug logging")
+		allowShell = flag.Bool("allow-shell", false,
+			"allow the built-in demo executor to run host shell commands (off by default)")
+		allowOrigin = flag.String("allow-origin", "",
+			"comma-separated extra browser origins allowed on /v1/rpc, /v1/ws and /v1/register")
 	)
 	flag.Parse()
 
@@ -56,13 +62,18 @@ func main() {
 	}
 
 	h := hub.NewHub(hub.Config{
-		AuthMode:  *authMode,
-		Token:     *token,
-		User:      *user,
-		Pass:      *pass,
-		DemoNodes: *demo,
-		Logger:    logger,
+		AuthMode:       *authMode,
+		Token:          *token,
+		User:           *user,
+		Pass:           *pass,
+		DemoNodes:      *demo,
+		AllowShell:     *allowShell,
+		AllowedOrigins: splitOrigins(*allowOrigin),
+		Logger:         logger,
 	})
+	if *allowShell {
+		logger.Warn("built-in demo shell executor ENABLED: command.send method=shell runs host commands as this process user")
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	h.Start(ctx)
@@ -89,7 +100,27 @@ func main() {
 		logger.Info("shutting down")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = srv.Shutdown(shutdownCtx)
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			// A failed/timed-out shutdown leaves connections open; do not
+			// report a clean stop.
+			logger.Error("shutdown failed", "error", err)
+			fmt.Fprintln(os.Stderr, "hubd shutdown failed")
+			os.Exit(1)
+		}
 	}
 	fmt.Println("hubd stopped")
+}
+
+// splitOrigins parses a comma-separated origin list, dropping blanks.
+func splitOrigins(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	var out []string
+	for _, o := range strings.Split(s, ",") {
+		if o = strings.TrimSpace(o); o != "" {
+			out = append(out, o)
+		}
+	}
+	return out
 }

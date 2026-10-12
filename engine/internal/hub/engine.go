@@ -6,10 +6,12 @@ package hub
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -31,14 +33,20 @@ const heartbeatInterval = 5 * time.Second
 
 // Config configures a Hub.
 type Config struct {
-	AuthMode   string // none | token | basic
-	Token      string // static token for token mode
-	User       string // username for basic mode
-	Pass       string // password for basic mode
-	DemoNodes  int    // number of simulated nodes n-1..n-N (default 3)
-	Logger     *slog.Logger
-	AllowShell bool   // allow shell method execution on demo nodes
-	AllowOrigin []string // allowed WS origins; if empty, allow absent origin, check present against Host/scheme
+	AuthMode  string // none | token | basic
+	Token     string // static token for token mode
+	User      string // username for basic mode
+	Pass      string // password for basic mode
+	DemoNodes int    // number of simulated nodes n-1..n-N (default 3)
+	Logger    *slog.Logger
+	// AllowShell permits the built-in demo executor to run host shell
+	// commands. Default false: the -demo executor is a simulator and must
+	// not reach the host OS unless an operator opts in explicitly.
+	AllowShell bool
+	// AllowedOrigins lists extra browser origins permitted on the
+	// state-changing endpoints (/v1/rpc, /v1/ws, /v1/register). Absent-Origin
+	// (non-browser) and same-origin clients are always allowed.
+	AllowedOrigins []string
 }
 
 // CallCtx carries per-call state into method handlers: the resolved auth
@@ -59,11 +67,9 @@ type Hub struct {
 	nodes  *nodeRegistry
 	cmds   *commandRegistry
 	tasks  *taskRegistry
+	seats  *seatRegistry
 	events *eventBus
 
-	cmdSeq  atomic.Int64
-	taskSeq atomic.Int64
-	subSeq  atomic.Int64
 	nodeSeq atomic.Int64
 
 	startOnce sync.Once
@@ -90,6 +96,7 @@ func NewHub(cfg Config) *Hub {
 	h.nodes = newNodeRegistry(h)
 	h.cmds = newCommandRegistry(h)
 	h.tasks = newTaskRegistry(h)
+	h.seats = newSeatRegistry(h)
 	h.registerMethods()
 	h.registerDemoNodes()
 	return h
@@ -135,6 +142,13 @@ func (h *Hub) registerMethods() {
 	// events.
 	h.reg("event.subscribe", false, h.eventSubscribe)
 	h.reg("event.unsubscribe", false, h.eventUnsubscribe)
+	// seats (PROTOCOL.md §4.7): reservable positions, the extensibility unit.
+	h.reg("seat.list", false, h.seatList)
+	h.reg("seat.create", false, h.seatCreate)
+	h.reg("seat.get", false, h.seatGet)
+	h.reg("seat.delete", false, h.seatDelete)
+	h.reg("seat.bind", false, h.seatBind)
+	h.reg("seat.unbind", false, h.seatUnbind)
 }
 
 // registerDemoNodes creates the always-online simulated nodes n-1..n-N.
@@ -168,7 +182,12 @@ func (h *Hub) watchdogLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			h.nodes.watchdogTick(heartbeatInterval)
+			offlined := h.nodes.watchdogTick(heartbeatInterval)
+			for _, id := range offlined {
+				// The occupant left: the seat shell returns to vacant
+				// (PROTOCOL.md §4.7 退席), keeping its expect profile.
+				h.seats.releaseByNode(id)
+			}
 			h.cmds.cleanupIdem()
 		}
 	}
@@ -269,6 +288,12 @@ func (h *Hub) AuthMode() string {
 	return h.cfg.AuthMode
 }
 
+// AllowedOrigins returns the operator-configured extra browser origins
+// allowed on the state-changing endpoints.
+func (h *Hub) AllowedOrigins() []string {
+	return h.cfg.AllowedOrigins
+}
+
 // Health returns the /v1/health payload.
 func (h *Hub) Health() map[string]any {
 	return map[string]any{"ok": true, "version": Version, "time": nowTS()}
@@ -322,6 +347,48 @@ func intParam(v any, def int) int {
 	return def
 }
 
+// maxMs is the upper bound for millisecond parameters: int64 milliseconds
+// converted to time.Duration would overflow (e.g. sleep ms=9223372036854775807
+// overflows to a negative duration and fires immediately), so values are
+// clamped to a range that cannot overflow Duration arithmetic on any platform.
+const maxMs = 2147483647
+
+// msParam reads an integer millisecond parameter clamped to [0, maxMs].
+// Non-integer numeric values (e.g. timeout: 0.9) are rejected with -32602
+// instead of silently truncating: intParam(0.9) == 0, and 0 means "no
+// timeout" for command timeouts — unbounded execution. Integer 0 keeps its
+// documented meaning (no timeout / immediate).
+func msParam(v any, def int) (int, *jsonrpc.Error) {
+	if v == nil {
+		return def, nil
+	}
+	switch n := v.(type) {
+	case json.Number:
+		if i, err := n.Int64(); err == nil {
+			return clampMs(i), nil
+		}
+	case float64:
+		if n == math.Trunc(n) {
+			return clampMs(int64(n)), nil
+		}
+	case int:
+		return clampMs(int64(n)), nil
+	case int64:
+		return clampMs(n), nil
+	}
+	return 0, jsonrpc.ErrInvalidParams("must be an integer number of milliseconds")
+}
+
+func clampMs(i int64) int {
+	if i < 0 {
+		return 0
+	}
+	if i > maxMs {
+		return maxMs
+	}
+	return int(i)
+}
+
 // parseBasicAuth decodes an HTTP Basic Authorization header.
 func parseBasicAuth(header string) (user, pass string, ok bool) {
 	const prefix = "Basic "
@@ -347,8 +414,9 @@ func clampPage(limit, offset int) (int, int) {
 	return limit, offset
 }
 
-// makeSubscription validates event types and creates a subscription, tracking
-// it on the calling connection when a tracker is present.
+// makeSubscription validates event types and creates a subscription owned by
+// the caller (empty for anonymous calls), tracking it on the calling
+// connection when a tracker is present.
 func (h *Hub) makeSubscription(cc *CallCtx, eventTypes []string, nodeID, taskID string) (map[string]any, *jsonrpc.Error) {
 	for _, t := range eventTypes {
 		if !knownEventTypes[t] {
@@ -357,13 +425,59 @@ func (h *Hub) makeSubscription(cc *CallCtx, eventTypes []string, nodeID, taskID 
 		}
 	}
 	id := h.newSubID()
-	h.events.newSub(id, eventTypes, nodeID, taskID)
+	h.events.newSub(id, eventTypes, nodeID, taskID, callerOwner(cc))
 	if cc != nil && cc.TrackSub != nil {
 		cc.TrackSub(id)
 	}
 	return map[string]any{"subscription_id": id}, nil
 }
 
+// randomID returns prefix + 128 bits of crypto/rand base64url. Resource ids
+// (subscriptions, commands, tasks) must be unguessable: cancellation and
+// unsubscribe act on caller-supplied ids alone, so a sequential id would let
+// any session enumerate and kill another session's resources. The PROTOCOL.md
+// §4 prefixes are kept; only the variable part changes.
+func randomID(prefix string) string {
+	// crypto/rand.Read never returns an error (Go >= 1.20); it panics on
+	// unrecoverable system failure.
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return prefix + base64.RawURLEncoding.EncodeToString(b)
+}
+
 func (h *Hub) newSubID() string {
-	return fmt.Sprintf("sub-%d", h.subSeq.Add(1))
+	return randomID("sub-")
+}
+
+// callerOwner returns the identity recorded on resources created by this
+// call: the access token for token sessions (and anonymous sessions holding
+// an issued token), "basic:<user>" for basic auth, "" for anonymous calls
+// (none mode without a token). Resources with an empty owner are
+// unrestricted — none mode is the documented trust-everything mode.
+func callerOwner(cc *CallCtx) string {
+	if cc == nil || cc.Session == nil || cc.Session.Token == nil {
+		return ""
+	}
+	t := cc.Session.Token
+	if t.AccessToken != "" {
+		return t.AccessToken
+	}
+	if t.User != "" {
+		return "basic:" + t.User
+	}
+	return ""
+}
+
+// mayActOn reports whether the caller may act on a resource with the given
+// owner: anonymous-created resources (empty owner) stay open to everyone;
+// owned resources require the caller's identity to match exactly.
+func mayActOn(cc *CallCtx, owner string) bool {
+	return owner == "" || callerOwner(cc) == owner
+}
+
+// errForbidden is -32004 auth.forbidden with data naming the resource type
+// (PROTOCOL.md §7.2) for cross-owner cancel/unsubscribe attempts.
+func errForbidden(resourceType string) *jsonrpc.Error {
+	return jsonrpc.NewError(jsonrpc.CodeAuthForbidden, "auth.forbidden",
+		map[string]any{"resource_type": resourceType})
 }

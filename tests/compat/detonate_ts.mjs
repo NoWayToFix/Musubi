@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 /**
- * 多语言一致性冒烟测试（TypeScript SDK 版）。
+ * 多语言一致性起爆测试（TypeScript SDK 版）。
  *
- * 与 smoke_py.py、smoke_go/main.go 执行完全相同的 10 步断言序列：
+ * 与 detonate_py.py、detonate_go/main.go 覆盖同一套核心断言场景（细节按各语言
+ * SDK API 略有差异）：
  *  1  engine.info 协商协议版本 / 传输能力
  *  2  engine.ping
  *  3  node.list / node.get
@@ -11,20 +12,20 @@
  *  6  command.batch 同步批量（成功 + 失败混合）
  *  7  task.create 异步创建 + 事件驱动等待终态
  *  8  错误码 node.not_found (-32010)
- *  9  订阅释放 (event.unsubscribe)
- * 10  c.close()
+ *  9  订阅释放 (event.unsubscribe + 重复取消 -32030)
+ * 10  c.close() 后调用拒绝 (code=6 CLOSED)
  *
  * 事件等待说明：TS SDK 的事件分发按事件类型/Dispatch 给监听器，不会缓存；
  * 因此 waiter 在 RPC 之前就先挂 '*' 监听并把事件收进 inbox，等待时可先查
  * inbox 再挂新监听，杜绝「事件先于等待到达」的竞态。
  *
- * 用法: node tests/compat/smoke_ts.mjs   （需先构建 sdk/ts）
+ * 用法: node tests/compat/detonate_ts.mjs   （需先构建 sdk/ts）
  * 环境: HUB_URL 覆盖默认地址
  */
 import { HubClient } from "../../sdk/ts/dist/index.mjs";
 
 const URL = process.env.HUB_URL || "http://127.0.0.1:8080";
-const IK = "smoke-ik-ts-" + process.pid;
+const IK = "det-ik-ts-" + process.pid;
 let passed = 0;
 
 function check(name, cond, detail = "") {
@@ -72,7 +73,7 @@ async function main() {
 
   // 1. 版本协商与能力发现
   const info = await c.info({
-    name: "smoke-ts", version: "1.0.0",
+    name: "det-ts", version: "1.0.0",
     protocol_versions: ["1.0"], encodings: ["json"],
     transports: ["ws", "http"],
   });
@@ -129,7 +130,7 @@ async function main() {
   // 7. task.create 异步：等待 task.completed
   await c.eventSubscribe({ event_types: ["task.completed", "task.failed"] });
   const task = await c.taskCreate({
-    name: "smoke-task-ts",
+    name: "det-task-ts",
     commands: [{ node_id: "n-3", method: "echo" }],
   });
   const taskId = task.task.id;
@@ -147,16 +148,31 @@ async function main() {
     check("node.not_found -32010", e.code === -32010, String(e.message));
   }
 
-  // 9. 订阅释放
+  // 9. 订阅释放：server 订阅 id 非空 → event.unsubscribe 成功 → 重复取消返回 -32030
+  check("event.subscribe 返回订阅 id",
+    typeof sub.subscription_id === "string" && sub.subscription_id.length > 0, sub.subscription_id);
   await c.eventUnsubscribe(sub.subscription_id);
-  check("event.unsubscribe", true, "");
+  try {
+    await c.eventUnsubscribe(sub.subscription_id);
+    check("event.unsubscribe 重复取消返回 -32030", false, "未抛错（订阅似乎未被释放）");
+  } catch (e) {
+    check("event.unsubscribe 重复取消返回 -32030", e.code === -32030, String(e.message));
+  }
 
-  // 10. 关闭客户端
+  // 10. 关闭客户端：close() 必须正常完成，且关闭后调用应拒绝（code=6 CLOSED）
   waitClose();
-  await c.close();
-  check("client.close", true, "");
+  await Promise.race([
+    c.close(),
+    new Promise((_, rej) => setTimeout(() => rej(new Error("client.close 超时")), 5000)),
+  ]);
+  try {
+    await c.ping();
+    check("client.close 后调用应拒绝", false, "未抛错");
+  } catch (e) {
+    check("client.close 后调用应拒绝", e.code === 6 /* SDK_CODES.CLOSED */, String(e.message));
+  }
 
-  console.log("TS SDK SMOKE: ALL PASS (%d)", passed);
+  console.log("TS SDK DETONATION: ALL PASS (%d)", passed);
 }
 
 main().catch((e) => { console.error("FATAL", e); process.exit(1); });

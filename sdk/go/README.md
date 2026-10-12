@@ -11,16 +11,24 @@ follow that document.
 ## Features
 
 - JSON-RPC 2.0 over WebSocket (`/v1/ws`) or HTTP POST (`/v1/rpc`), with the
-  protocol fallback order `ws -> sse -> poll` (§6.1).
+  protocol fallback order `ws -> sse -> poll` (§6.1). The WS→HTTP fallback
+  happens only for transport-level failures; server-returned `*HubError`s are
+  never resent.
+- Per-call timeout applies to WS calls too (`Options.Timeout`); a context
+  deadline always wins when shorter.
 - Transport selection: `auto` (negotiated via `engine.info`), `ws`, `http`,
   `poll`.
 - Automatic version negotiation (`engine.info`); `-32005` `HubError` on no
   overlap.
 - Events: WebSocket notifications, SSE stream or long-poll — with reconnect +
   exponential backoff (base 1s, factor 2, max 30s, ±20% jitter) and automatic
-  re-subscription.
+  re-subscription. Poll responses are classified: 2xx proceeds, 401/403 stop
+  the loop (surfaced via `Options.OnError`), other errors retry with backoff.
+  After a reconnect the poll cursor resets to 0 so a restarted engine
+  (in-memory cursor) is re-read instead of starving the client.
 - Event dedup by `event.id` with a 5000-entry sliding window.
-- Auth: token / basic login, refresh, logout.
+- Auth: token / basic login, refresh, logout; stores the rotating access +
+  refresh token pair and auto-refreshes once on `-32003`/`-32002`.
 - Compatibility: unknown response/event fields are ignored, missing fields are
   tolerated, unknown event types are delivered as-is (consumers must ignore
   them, §4.5).
@@ -100,10 +108,32 @@ if errors.As(err, &he) {
 
 ## Offline queue
 
-The offline write queue is intentionally left as a `TODO` scaffold
-(`HubClient.QueueWrite`): the default behavior is "at-most-once" — transport
-errors surface to the caller. See `docs/PROTOCOL.md` §6.2 for the full
-semantics.
+Write calls (everything except `engine.*` and `auth.*`) that fail with a
+transport-level error are buffered in an in-memory FIFO (cap 1000) and
+replayed in order once the connection works again (PROTOCOL.md §6.2). Such a
+call returns `sdk.ErrQueued` — the request was NOT executed yet:
+
+```go
+_, err := c.CommandSend(ctx, spec)
+if errors.Is(err, sdk.ErrQueued) {
+    // buffered; it replays automatically after reconnect
+}
+```
+
+Set `Options.DisableOfflineQueue` for strict at-most-once semantics (the
+transport error surfaces instead). `HubClient.QueueWrite(method, params)` can
+buffer a write manually. Server-returned `*HubError`s are authoritative and
+never queued nor resent on another transport.
+
+## Auth / token rotation
+
+`Login` and `Refresh` store the whole token pair. Under rotation the engine
+returns a NEW access_token AND a NEW refresh_token and invalidates the old
+pair; both are stored together. A call rejected with `-32003`/`-32002` is
+retried once after an automatic `auth.refresh` (single-flighted, so
+concurrent calls share one rotation instead of burning the rotated-away
+token). `Refresh(ctx, "")` uses the stored refresh token; a refresh token
+rejected by the server is dropped.
 
 ## Contract
 

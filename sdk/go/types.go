@@ -17,6 +17,38 @@ type Node struct {
 	Metadata     map[string]any `json:"metadata,omitempty"`
 	LastSeen     string         `json:"last_seen,omitempty"`
 	RegisteredAt string         `json:"registered_at,omitempty"`
+	SeatID       *string        `json:"seat_id,omitempty"` // occupied seat (PROTOCOL.md §4.7)
+}
+
+// SeatExpect is the expected profile a filling node must match
+// (PROTOCOL.md §4.7): capabilities = all required, tags = any-match,
+// metadata = key/value equality. All fields optional.
+type SeatExpect struct {
+	Capabilities []string       `json:"capabilities,omitempty"`
+	Tags         []string       `json:"tags,omitempty"`
+	Metadata     map[string]any `json:"metadata,omitempty"`
+}
+
+// Seat is a reservable position in the engine (PROTOCOL.md §4.7): the unit of
+// extensibility. Kind "standing" = occupied by a node; "vacant" = reserved.
+type Seat struct {
+	ID         string      `json:"id,omitempty"`
+	Kind       string      `json:"kind,omitempty"` // standing|vacant
+	Name       string      `json:"name,omitempty"`
+	BindPolicy string      `json:"bind_policy,omitempty"` // auto|manual
+	Expect     *SeatExpect `json:"expect,omitempty"`
+	NodeID     *string     `json:"node_id,omitempty"`
+	CreatedAt  string      `json:"created_at,omitempty"`
+	FilledAt   *string     `json:"filled_at,omitempty"`
+	ReleasedAt *string     `json:"released_at,omitempty"`
+}
+
+// SeatSpec is the seat.create parameter: creates a vacant seat.
+// BindPolicy defaults to "manual" server-side; Expect is optional.
+type SeatSpec struct {
+	Name       string      `json:"name,omitempty"`
+	BindPolicy string      `json:"bind_policy,omitempty"` // auto|manual
+	Expect     *SeatExpect `json:"expect,omitempty"`
 }
 
 // CommandError describes a failed command/task (PROTOCOL.md §4.2).
@@ -143,6 +175,12 @@ type NodeListResult struct {
 // TaskListResult is the task.list result.
 type TaskListResult struct {
 	Tasks []Task `json:"tasks,omitempty"`
+	Total int    `json:"total,omitempty"`
+}
+
+// SeatListResult is the seat.list result.
+type SeatListResult struct {
+	Seats []Seat `json:"seats,omitempty"`
 	Total int    `json:"total,omitempty"`
 }
 
