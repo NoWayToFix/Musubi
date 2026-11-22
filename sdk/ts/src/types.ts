@@ -55,6 +55,13 @@ export type RpcMessage = RpcRequest | RpcResponse | RpcNotification | RpcMessage
 
 export type NodeStatus = 'online' | 'busy' | 'offline' | 'unknown';
 
+/** Self-reported platform descriptor of a node (PROTOCOL.md §4.1). */
+export interface NodePlatform extends PlatformInfo {
+  runtime_version?: string;
+  agent_version?: string;
+  labels?: Record<string, string>;
+}
+
 /** A controlled node. `capabilities`/`tags`/`metadata` are opaque to the engine. */
 export interface Node {
   id?: string;
@@ -63,9 +70,36 @@ export interface Node {
   capabilities?: string[];
   tags?: string[];
   metadata?: Record<string, unknown>;
+  platform?: NodePlatform;
   last_seen?: Timestamp;
   registered_at?: Timestamp;
   seat_id?: string;
+  [key: string]: unknown;
+}
+
+/** node.register parameter: join the control center over JSON-RPC. */
+export interface NodeRegisterParams {
+  node_id?: string;
+  name?: string;
+  capabilities?: string[];
+  tags?: string[];
+  metadata?: Record<string, unknown>;
+  platform?: NodePlatform;
+  [key: string]: unknown;
+}
+
+export interface NodeRegisterResult {
+  node?: Node;
+  [key: string]: unknown;
+}
+
+export interface NodeHeartbeatParams {
+  node_id: string;
+  [key: string]: unknown;
+}
+
+export interface NodeUnregisterParams {
+  node_id: string;
   [key: string]: unknown;
 }
 
@@ -135,6 +169,8 @@ export type CommandStatus =
 export interface Command {
   id?: string;
   node_id?: string;
+  /** Routing seat, set when the command was addressed by seat_id. */
+  seat_id?: string | null;
   method?: string;
   params?: Record<string, unknown>;
   status?: CommandStatus;
@@ -280,6 +316,12 @@ export interface AuthResult {
 export interface NodeFilter {
   status?: string;
   tags?: string[];
+  /** Exact match on platform.runtime (go, node, python, browser, demo, ...). */
+  runtime?: string;
+  /** Alias for runtime. */
+  platform?: string;
+  /** Exact match on platform.os. */
+  os?: string;
   [key: string]: unknown;
 }
 
@@ -324,10 +366,64 @@ export interface UnsubscribeResult {
 /** A command to dispatch (command.send / command.batch / task.create). */
 export interface CommandSpec {
   node_id?: string;
+  /** Address a seat instead of a node (mutually exclusive with node_id). */
+  seat_id?: string;
   method?: string;
   params?: Record<string, unknown>;
   timeout?: number;
   idempotency_key?: string;
+  [key: string]: unknown;
+}
+
+/** command.pull: real-node worker claims queued commands. */
+export interface CommandPullParams {
+  node_id?: string;
+  limit?: number;
+  /** Long-poll milliseconds (0 = immediate). */
+  wait?: number;
+  [key: string]: unknown;
+}
+
+export interface CommandPullResult {
+  commands?: Command[];
+  [key: string]: unknown;
+}
+
+/** command.complete: report a pulled command's terminal state. */
+export interface CommandCompleteParams {
+  node_id?: string;
+  command_id?: string;
+  status?: CommandStatus;
+  result?: unknown;
+  error?: ErrorData | null;
+  [key: string]: unknown;
+}
+
+export interface CommandCompleteResult {
+  command?: Command;
+  [key: string]: unknown;
+}
+
+export interface CommandGetParams {
+  command_id?: string;
+  [key: string]: unknown;
+}
+
+export interface CommandGetResult {
+  command?: Command;
+  [key: string]: unknown;
+}
+
+export interface CommandListParams {
+  filter?: { status?: string; node_id?: string; task_id?: string; [key: string]: unknown };
+  limit?: number;
+  offset?: number;
+  [key: string]: unknown;
+}
+
+export interface CommandListResult {
+  commands?: Command[];
+  total?: number;
   [key: string]: unknown;
 }
 

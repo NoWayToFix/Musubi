@@ -8,6 +8,7 @@
   "properties": {
     "id": { "type": "string", "examples": ["c-1"] },
     "node_id": { "type": "string" },
+    "seat_id": { "type": ["string", "null"], "description": "Seat that routed this command (PROTOCOL.md §4.7); node_id is the actual executor." },
     "method": { "type": "string", "examples": ["echo"] },
     "params": { "type": "object", "description": "Opaque to the engine." },
     "status": { "type": "string", "enum": ["pending", "accepted", "running", "succeeded", "failed", "cancelled", "timeout"] },

@@ -1,6 +1,6 @@
 {
   "name": "@musubi/hub-sdk",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "TypeScript Control Hub SDK (JSON-RPC 2.0, WS/SSE/poll transports)",
   "license": "MIT",
   "type": "module",

@@ -21,6 +21,9 @@ var (
 		{"id": "transport.http", "version": "1.0"},
 		{"id": "encoding.json", "version": "1.0"},
 		{"id": "seat.registry", "version": "1.0"},
+		{"id": "seat.routing", "version": "1.0"},
+		{"id": "command.dispatch", "version": "1.0"},
+		{"id": "platform.registry", "version": "1.0"},
 	}
 
 	hubFeatures = map[string]any{
@@ -28,6 +31,9 @@ var (
 		"subscribe": true,
 		"sse":       true,
 		"poll":      true,
+		"dispatch":  true,
+		"console":   true,
+		"platforms": true,
 	}
 )
 

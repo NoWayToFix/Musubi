@@ -18,6 +18,21 @@
 
 > 离线队列：三个官方 SDK 均默认开启（内存 FIFO，上限 1000，重连后按序重放）；队列排除 `engine.*` / `auth.*`（Python SDK 额外排除 `event.*`），详见 PROTOCOL.md §6.2。
 
+## 1.1 平台接入矩阵（Agent 运行时）
+
+| 平台 / 运行时 | SDK | Agent 入口 | platform.runtime | 状态 |
+|---|---|---|---|---|
+| Linux / macOS / Windows（服务端、桌面、嵌入式） | Go | `sdk.NewAgent` + `Run(ctx)` | `go` | ✅ |
+| Linux / macOS / Windows（服务端、桌面） | Python 3.8+ | `Agent(...).start()` | `python` | ✅ |
+| Node.js ≥ 18 | TypeScript | `new Agent(...).run()` | `node` | ✅ |
+| Deno / Bun | TypeScript | 同上（自动探测） | `deno` / `bun` | ✅ |
+| Electron ≥ 22（主进程） | TypeScript | 同上 | `electron` | ✅ |
+| 浏览器 | TypeScript（ESM/UMD） | 同上（需 `-allow-origin`） | `browser` | ✅ |
+| 任意其他语言 | 无 SDK | `node.register → heartbeat → pull → complete` | 自报 | ✅ 按契约 |
+
+> Agent 自动上报 `platform`（os/arch/runtime/runtime_version/agent_version），控制台按 `platform.runtime` 分组；
+> 同平台多节点可挂同一席位，由席位做稳定寻址（§7 `seat.routing`）。
+
 ## 2. 运行时矩阵（TS SDK 同构性）
 
 | 运行时 | WebSocket | HTTP/SSE | 自动检测 | 备注 |
@@ -71,7 +86,7 @@
 | Linux x86_64 / arm64 / armv7 | `linux/amd64,arm64,arm` | ✅ CGO_ENABLED=0 交叉编译 |
 | macOS x86_64 / arm64 | `darwin/amd64,arm64` | ✅ |
 | Windows x86_64 / arm64 | `windows/amd64,arm64` | ✅ |
-| 嵌入式（只读 FS、无 root） | 任意 | ✅ 默认不写文件；`-store sqlite` 才需要写权限 |
+| 嵌入式（只读 FS、无 root） | 任意 | ✅ 默认纯内存；仅 `-data-dir` 可选落盘 |
 
 | 部署形态 | 支持 | 说明 |
 |---|---|---|
@@ -91,6 +106,11 @@
 | `event.stream` | ✅ | ✅ | ✅ | ✅ | 事件订阅/推送 |
 | `auth.token` | ✅ | ✅ | ✅ | ✅ | 认证/刷新/注销 |
 | `seat.registry` | ✅ | ✅ | ✅ | ✅ | 席位（PROTOCOL.md §4.7）：常席/虚席、补席/退席，可拓展性单元 |
+| `seat.routing` | ✅ | ✅ | ✅ | ✅ | 用 `seat_id` 寻址指令/任务条目，引擎解析到当前占位节点 |
+| `command.dispatch` | ✅ | ✅ | ✅ | ✅ | 真实节点 `command.pull` / `command.complete` 拉取式下发（任意语言可做 worker） |
+| `platform.registry` | ✅ | ✅ | ✅ | ✅ | 节点 `platform` 描述（os/arch/runtime/版本/labels）+ `node.list` 平台过滤；`features.platforms` |
+| `agent.runtime`（SDK 层） | — | ✅ Agent | ✅ Agent | ✅ Agent | 注册/心跳/拉取/执行/回执/注销；平台自动探测 |
+| `web.console` | ✅ `/console/` | — | — | — | 内嵌零构建集控中心控制台（平台舰队视图、平台过滤） |
 
 ## 8. 协议版本支持矩阵
 
@@ -111,13 +131,15 @@
 | basic | ✅ `-auth basic` | ✅ | 用户名/口令 |
 | mTLS | 🟡 反向代理层 | 🟡 `ca`/证书配置 | 走网关 |
 | OAuth2 | 🟡 Auth 接口插件 | 🟡 | 预留 |
+| shell 执行器 | 🟡 `-allow-shell` + `-shell-allow` | — | 仅 argv、可执行文件白名单、审计日志；默认关闭且不广告能力 |
+| 持久化文件 | 🟡 `-data-dir` | — | `<dir>/hub-state.json`，0600、原子写；含 token，按凭证保护 |
 
 ## 10. 一致性测试矩阵（tests/）
 
 | 测试 | 覆盖 | 语言 |
 |---|---|---|
-| 契约用例（JSON 驱动） | 全部方法、错误码、事件、协商 | 语言无关（`tests/contract/cases/*.json`） |
+| 契约用例（JSON 驱动） | 全部方法、错误码、事件、协商、平台注册/过滤 | 语言无关（`tests/contract/cases/*.json`） |
 | 多语言一致性 | 同一用例集跑 Go/TS/Python SDK，比对结果 | Go + Node + Python runner |
 | 兼容性矩阵起爆 | 传输降级、未知字段忽略、旧事件忽略、断线重连 | 引擎 + TS SDK |
 
-> 说明：矩阵中 🟡/⭕ 项不影响默认"极致兼容"承诺——所有未实现项都可通过契约（JSON + WS/HTTP）接入，或通过已定义的可插拔接口（Transport / Encoder / Auth）启用。
+> 说明：矩阵中 🟡/⭕ 项不影响默认"极致兼容"承诺；所有未实现项都可通过契约（JSON + WS/HTTP）接入，或通过已定义的可插拔接口（Transport / Encoder / Auth）启用。

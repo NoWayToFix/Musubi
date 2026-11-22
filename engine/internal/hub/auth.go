@@ -243,7 +243,11 @@ func constEq(a, b string) bool {
 // auth.* RPC handlers
 
 func (h *Hub) authLogin(cc *CallCtx, p map[string]any) (any, *jsonrpc.Error) {
-	return h.auth.login(p)
+	res, err := h.auth.login(p)
+	if err == nil {
+		h.markDirty()
+	}
+	return res, err
 }
 
 func (h *Hub) authRefresh(cc *CallCtx, p map[string]any) (any, *jsonrpc.Error) {
@@ -251,7 +255,11 @@ func (h *Hub) authRefresh(cc *CallCtx, p map[string]any) (any, *jsonrpc.Error) {
 	if rt == "" {
 		return nil, jsonrpc.ErrInvalidParams("refresh_token required")
 	}
-	return h.auth.refresh(rt)
+	res, err := h.auth.refresh(rt)
+	if err == nil {
+		h.markDirty()
+	}
+	return res, err
 }
 
 func (h *Hub) authLogout(cc *CallCtx, p map[string]any) (any, *jsonrpc.Error) {
@@ -260,10 +268,12 @@ func (h *Hub) authLogout(cc *CallCtx, p map[string]any) (any, *jsonrpc.Error) {
 	// depending on the caller's own session header.
 	if tok := strParam(p["access_token"]); tok != "" {
 		h.auth.revoke(tok)
+		h.markDirty()
 		return map[string]any{}, nil
 	}
 	if cc != nil {
 		h.auth.logout(cc.Session)
 	}
+	h.markDirty()
 	return map[string]any{}, nil
 }

@@ -44,6 +44,57 @@ with client.subscribe() as sub:
     print("event:", ev["type"], ev.get("data"))
 ```
 
+## Seats and real-node dispatch
+
+```python
+# Address a seat instead of a node (mutually exclusive with node_id).
+client.command_send(seat_id="s-...", method="echo", params={"text": "hi"})
+client.command_list({"status": "succeeded"}, limit=20)
+client.node_list({"runtime": "python"})      # node.list filters platform runtime/os
+
+# Real-node worker loop: claim, execute, complete.
+for cmd in client.command_pull("w-1", limit=4, wait=5000)["commands"]:
+    try:
+        result = run_locally(cmd["method"], cmd.get("params", {}))
+        client.command_complete("w-1", cmd["id"], "succeeded", result=result)
+    except Exception as exc:
+        client.command_complete("w-1", cmd["id"], "failed",
+                                error={"code": -32000, "message": str(exc)})
+```
+
+## Agent（节点运行时）
+
+`Agent` 实现 PROTOCOL.md §5.4 的完整生命周期，是"一个平台一份 SDK"的接入入口：
+
+```python
+from hub import Agent, AgentHandlerError
+
+agent = Agent(url="http://127.0.0.1:8080", node_id="py-app-1",
+              capabilities=["echo", "sys.info"], tags=["python", "prod"],
+              concurrency=2)
+
+@agent.handle("sys.info")
+def sys_info(_params):
+    return collect_sys_info()
+
+@agent.handle("fail")
+def fail(params):
+    raise AgentHandlerError(-32603, params.get("message", "failed"))
+
+agent.start()          # 后台注册 → 心跳 → pull → 执行 → complete
+agent.wait()           # 阻塞直到 stop()
+```
+
+- **自动平台探测**：`detect_platform()` 上报 `os/arch/runtime=python/runtime_version/agent_version`；
+  可用 `platform=` 覆盖。
+- **内置方法**：`echo`、`platform.info`。
+- **失败语义**：handler 抛异常 → `failed`；`AgentHandlerError(code, message)` 指定错误码；
+  未注册方法 → `-32601`。
+- **自愈**：注册指数退避；`-32010`/`-32011` 自动重新注册；`stop()` 触发注销。
+- 线程安全：handler 注册、心跳与多个 pull 线程互不阻塞；`handler_timeout=` 可限制单条执行时长。
+
+示例：[`examples/agents/python`](../../examples/agents/python/)。
+
 ## Error handling
 
 All JSON-RPC errors raise `HubError`:

@@ -4,6 +4,8 @@
  * Public API surface. Everything else under src/ is internal.
  */
 export { HubClient, SDK_VERSION } from './client';
+export { Agent, AgentHandlerError, detectPlatform } from './agent';
+export type { AgentHandler, AgentOptions } from './agent';
 export { HubError, isHubError, RPC_CODES, HUB_CODES, SDK_CODES } from './errors';
 export { createMainBridge, createPreloadAPI } from './electron';
 export type { MainBridge, PreloadApi } from './electron';
@@ -28,6 +30,11 @@ export type {
   // models
   Node,
   NodeStatus,
+  NodePlatform,
+  NodeRegisterParams,
+  NodeRegisterResult,
+  NodeHeartbeatParams,
+  NodeUnregisterParams,
   Command,
   CommandStatus,
   Task,

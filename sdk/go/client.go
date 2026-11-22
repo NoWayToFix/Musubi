@@ -1062,6 +1062,71 @@ func (c *HubClient) NodeGet(ctx context.Context, nodeID string) (*Node, error) {
 	return out.Node, nil
 }
 
+// NodeRegister registers or refreshes a real node over JSON-RPC
+// (PROTOCOL.md §5). Agents call this on startup and after reconnects.
+func (c *HubClient) NodeRegister(ctx context.Context, p NodeRegisterParams) (*Node, error) {
+	params := map[string]any{}
+	if p.NodeID != "" {
+		params["node_id"] = p.NodeID
+	}
+	if p.Name != "" {
+		params["name"] = p.Name
+	}
+	if len(p.Capabilities) > 0 {
+		params["capabilities"] = p.Capabilities
+	}
+	if len(p.Tags) > 0 {
+		params["tags"] = p.Tags
+	}
+	if p.Metadata != nil {
+		params["metadata"] = p.Metadata
+	}
+	if p.Platform != nil {
+		params["platform"] = p.Platform
+	}
+	res, err := c.Call(ctx, "node.register", params)
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Node *Node `json:"node"`
+	}
+	if err := remap(res, &out); err != nil {
+		return nil, err
+	}
+	return out.Node, nil
+}
+
+// NodeHeartbeat refreshes a node's last_seen timestamp.
+func (c *HubClient) NodeHeartbeat(ctx context.Context, nodeID string) (*Node, error) {
+	res, err := c.Call(ctx, "node.heartbeat", map[string]any{"node_id": nodeID})
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Node *Node `json:"node"`
+	}
+	if err := remap(res, &out); err != nil {
+		return nil, err
+	}
+	return out.Node, nil
+}
+
+// NodeUnregister removes a node from the registry (and fails its work).
+func (c *HubClient) NodeUnregister(ctx context.Context, nodeID string) (*Node, error) {
+	res, err := c.Call(ctx, "node.unregister", map[string]any{"node_id": nodeID})
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Node *Node `json:"node"`
+	}
+	if err := remap(res, &out); err != nil {
+		return nil, err
+	}
+	return out.Node, nil
+}
+
 // ---------------------------------------------------------------------------
 // command.*
 // ---------------------------------------------------------------------------
@@ -1113,8 +1178,101 @@ func (c *HubClient) CommandCancel(ctx context.Context, commandID string) (*Comma
 	return out.Command, nil
 }
 
+// CommandPull claims up to limit queued commands for a real node, optionally
+// long-polling for up to waitMS milliseconds.
+func (c *HubClient) CommandPull(ctx context.Context, nodeID string, limit int, waitMS int64) ([]Command, error) {
+	params := map[string]any{"node_id": nodeID}
+	if limit > 0 {
+		params["limit"] = limit
+	}
+	if waitMS > 0 {
+		params["wait"] = waitMS
+	}
+	res, err := c.Call(ctx, "command.pull", params)
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Commands []Command `json:"commands"`
+	}
+	if err := remap(res, &out); err != nil {
+		return nil, err
+	}
+	return out.Commands, nil
+}
+
+// CommandComplete reports the terminal state of a command claimed by a node.
+func (c *HubClient) CommandComplete(ctx context.Context, p CommandCompleteParams) (*Command, error) {
+	params := map[string]any{
+		"node_id":    p.NodeID,
+		"command_id": p.CommandID,
+		"status":     p.Status,
+	}
+	if p.Result != nil {
+		params["result"] = p.Result
+	}
+	if p.Error != nil {
+		params["error"] = p.Error
+	}
+	res, err := c.Call(ctx, "command.complete", params)
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Command *Command `json:"command"`
+	}
+	if err := remap(res, &out); err != nil {
+		return nil, err
+	}
+	return out.Command, nil
+}
+
+// CommandGet fetches one command by id.
+func (c *HubClient) CommandGet(ctx context.Context, commandID string) (*Command, error) {
+	res, err := c.Call(ctx, "command.get", map[string]any{"command_id": commandID})
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Command *Command `json:"command"`
+	}
+	if err := remap(res, &out); err != nil {
+		return nil, err
+	}
+	return out.Command, nil
+}
+
+// CommandList lists commands with an optional filter ({status,node_id,task_id}).
+func (c *HubClient) CommandList(ctx context.Context, filter map[string]any, limit, offset int) (*CommandListResult, error) {
+	params := map[string]any{}
+	if filter != nil {
+		params["filter"] = filter
+	}
+	if limit > 0 {
+		params["limit"] = limit
+	}
+	if offset > 0 {
+		params["offset"] = offset
+	}
+	res, err := c.Call(ctx, "command.list", params)
+	if err != nil {
+		return nil, err
+	}
+	var out CommandListResult
+	if err := remap(res, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 func specParams(spec CommandSpec) map[string]any {
-	p := map[string]any{"node_id": spec.NodeID, "method": spec.Method}
+	p := map[string]any{"method": spec.Method}
+	if spec.NodeID != "" {
+		p["node_id"] = spec.NodeID
+	}
+	if spec.SeatID != "" {
+		p["seat_id"] = spec.SeatID
+	}
 	if spec.Params != nil {
 		p["params"] = spec.Params
 	}

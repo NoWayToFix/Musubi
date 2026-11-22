@@ -123,6 +123,11 @@ func (r *taskRegistry) list(f *taskFilter, limit, offset int) ([]*Task, int) {
 		out = append(out, cloneTask(t))
 	}
 	total := len(out)
+	// Newest first is friendlier for a live console; the protocol leaves
+	// ordering unspecified for lists.
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
 	if offset >= len(out) {
 		out = []*Task{}
 	} else {
@@ -258,18 +263,26 @@ func (h *Hub) taskCreate(cc *CallCtx, p map[string]any) (any, *jsonrpc.Error) {
 		if !ok {
 			return nil, jsonrpc.ErrInvalidParams("invalid command entry")
 		}
-		nodeID := strParam(pm["node_id"])
 		method := strParam(pm["method"])
-		if nodeID == "" || method == "" {
-			return nil, jsonrpc.ErrInvalidParams("node_id and method are required per command")
+		if method == "" {
+			return nil, jsonrpc.ErrInvalidParams("method is required per command")
+		}
+		nodeID, seatID, terr := h.resolveTarget(strParam(pm["node_id"]), strParam(pm["seat_id"]))
+		if terr != nil {
+			return nil, terr
 		}
 		timeout, terr := msParam(pm["timeout"], defaultCommandTimeoutMs)
 		if terr != nil {
 			return nil, terr
 		}
 		params, _ := pm["params"].(map[string]any)
-		cmds = append(cmds, h.newCommand(nodeID, method, params, timeout, nil))
-		ids = append(ids, cmds[len(cmds)-1].ID)
+		c := h.newCommand(nodeID, method, params, timeout, nil)
+		c.SeatID = seatID
+		if !h.nodes.isDemo(nodeID) {
+			c.Status = cmdPending // queued until the real node pulls it
+		}
+		cmds = append(cmds, c)
+		ids = append(ids, c.ID)
 	}
 	owner := callerOwner(cc)
 	for _, c := range cmds {
@@ -343,7 +356,7 @@ func (h *Hub) taskCancel(cc *CallCtx, p map[string]any) (any, *jsonrpc.Error) {
 			map[string]any{"task_id": id, "status": t.Status})
 	}
 	for _, cid := range t.CommandIDs {
-		h.cmds.cancel(cid)
+		h.cancelCommand(cid)
 	}
 	h.tasks.cancel(id)
 	select {
@@ -382,12 +395,28 @@ func (h *Hub) runTask(t *Task) {
 
 // executeTaskCommand runs one task command to completion and updates progress.
 func (h *Hub) executeTaskCommand(t *Task, c *Command) {
-	if !h.nodes.tryAcquire(c.NodeID) {
-		// Already terminal (cancelled before execution) or node unavailable.
-		if snap, ok := h.cmds.get(c.ID); ok && isTerminal(snap.Status) {
+	// Already terminal (cancelled before execution) or node unavailable.
+	if snap, ok := h.cmds.get(c.ID); ok && isTerminal(snap.Status) {
+		h.taskProgress(t.ID)
+		return
+	}
+	// Real nodes: queue and wait for command.pull/command.complete. The runner
+	// waits so serial order and final aggregation stay correct.
+	if !h.nodes.isDemo(c.NodeID) {
+		if !h.nodes.accepting(c.NodeID) {
+			code, msg, data := h.nodeBusyOrOfflineCode(c.NodeID)
+			h.cmds.finish(c.ID, cmdFailed, nil, jsonrpc.NewError(code, msg, data))
 			h.taskProgress(t.ID)
 			return
 		}
+		h.publishCommandAccepted(c)
+		h.startRemoteTimer(c)
+		h.dispatch.enqueue(c)
+		h.waitCommand(c.ID)
+		h.taskProgress(t.ID)
+		return
+	}
+	if !h.nodes.tryAcquire(c.NodeID) {
 		code, msg, data := h.nodeBusyOrOfflineCode(c.NodeID)
 		h.cmds.finish(c.ID, cmdFailed, nil, jsonrpc.NewError(code, msg, data))
 		h.taskProgress(t.ID)

@@ -56,7 +56,8 @@ var HUB_CODES = {
   RATE_LIMITED: -32041,
   SEAT_NOT_FOUND: -32050,
   SEAT_OCCUPIED: -32051,
-  SEAT_EXPECT_MISMATCH: -32052
+  SEAT_EXPECT_MISMATCH: -32052,
+  SEAT_VACANT: -32053
 };
 var SDK_CODES = {
   /** Request timed out locally. */
@@ -785,7 +786,7 @@ var PollTransport = class {
 };
 
 // src/client.ts
-var SDK_VERSION = "1.0.0";
+var SDK_VERSION = "1.1.0";
 var DEFAULT_TRANSPORT_ORDER = ["ws", "http", "poll"];
 var QUEUE_LIMIT = 1e3;
 var RECONNECT_BASE_MS = 1e3;
@@ -1388,6 +1389,16 @@ var HubClient = class {
       return res;
     });
   }
+  /** Register or refresh this platform as a real node (PROTOCOL.md §5). */
+  nodeRegister(params) {
+    return this.request("node.register", { ...params });
+  }
+  nodeHeartbeat(nodeId) {
+    return this.request("node.heartbeat", { node_id: nodeId });
+  }
+  nodeUnregister(nodeId) {
+    return this.request("node.unregister", { node_id: nodeId });
+  }
   nodeList(filter, limit, offset) {
     const params = {};
     if (filter) params["filter"] = filter;
@@ -1408,13 +1419,28 @@ var HubClient = class {
   }
   commandSend(spec) {
     const params = {
-      node_id: spec.node_id,
+      ...spec.node_id !== void 0 ? { node_id: spec.node_id } : {},
+      ...spec.seat_id !== void 0 ? { seat_id: spec.seat_id } : {},
       method: spec.method,
       ...spec.params !== void 0 ? { params: spec.params } : {},
       ...spec.timeout !== void 0 ? { timeout: spec.timeout } : {},
       ...spec.idempotency_key !== void 0 ? { idempotency_key: spec.idempotency_key } : {}
     };
     return this.request("command.send", params);
+  }
+  /** command.pull: claim queued commands as a real node (long-poll via wait). */
+  commandPull(params) {
+    return this.request("command.pull", params);
+  }
+  /** command.complete: report a pulled command's terminal state. */
+  commandComplete(params) {
+    return this.request("command.complete", params);
+  }
+  commandGet(commandId) {
+    return this.request("command.get", { command_id: commandId });
+  }
+  commandList(params = {}) {
+    return this.request("command.list", params);
   }
   commandBatch(specs, idempotencyKey) {
     const params = { commands: specs };
@@ -1517,6 +1543,334 @@ function detectPlatform() {
   return { os, runtime, arch };
 }
 
+// src/agent.ts
+var AgentHandlerError = class extends Error {
+  constructor(code, message, data) {
+    super(message);
+    this.name = "AgentHandlerError";
+    this.code = code;
+    this.data = data;
+  }
+};
+function detectPlatform2() {
+  const g = globalThis;
+  const p = g["process"];
+  const nav = g["navigator"];
+  const bun = p?.versions?.["bun"];
+  const deno = g["Deno"];
+  let os = "unknown";
+  let arch = "unknown";
+  let runtime = "javascript";
+  let runtimeVersion = "";
+  if (bun) {
+    runtime = "bun";
+    runtimeVersion = bun;
+    os = p?.platform ?? os;
+    arch = p?.arch ?? arch;
+  } else if (p?.versions?.["node"]) {
+    runtime = p?.["versions"]?.["electron"] ? "electron" : "node";
+    runtimeVersion = p.versions.node;
+    os = p.platform ?? os;
+    arch = p.arch ?? arch;
+  } else if (deno?.version?.deno) {
+    runtime = "deno";
+    runtimeVersion = deno.version.deno;
+    os = deno.build?.os ?? os;
+    arch = deno.build?.arch ?? arch;
+  } else if (nav) {
+    runtime = "browser";
+    runtimeVersion = nav.userAgent ?? "";
+    os = nav.platform ?? os;
+  }
+  return { os, arch, runtime, runtime_version: runtimeVersion, agent_version: SDK_VERSION };
+}
+var SLEEP_ABORT = /* @__PURE__ */ Symbol("aborted");
+function sleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) return reject(SLEEP_ABORT);
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(SLEEP_ABORT);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+function isAbort(err) {
+  return err === SLEEP_ABORT || err instanceof Error && err.name === "AbortError";
+}
+function isNodeGone(err) {
+  const code = err?.code;
+  return code === -32010 || code === -32011;
+}
+function toCommandError(err) {
+  if (err instanceof AgentHandlerError) {
+    return err.data ? { code: err.code, message: err.message, data: err.data } : { code: err.code, message: err.message };
+  }
+  const code = err?.code ?? -32603;
+  return { code, message: err instanceof Error ? err.message : String(err) };
+}
+var Agent = class {
+  constructor(options = {}) {
+    this.handlers = /* @__PURE__ */ new Map();
+    this.running = false;
+    const {
+      client,
+      nodeId,
+      name,
+      capabilities,
+      tags,
+      metadata,
+      platform,
+      heartbeatMs,
+      pullWaitMs,
+      concurrency,
+      handlerTimeoutMs,
+      onError,
+      ...clientOpts
+    } = options;
+    this.client = client ?? new HubClient(clientOpts);
+    this.ownClient = !client;
+    this.nodeIdOpt = nodeId;
+    this.name = name;
+    this.capabilities = capabilities ?? [];
+    this.tags = tags ?? [];
+    this.metadata = metadata;
+    this.platform = platform ?? detectPlatform2();
+    this.heartbeatMs = heartbeatMs ?? 1e4;
+    this.pullWaitMs = pullWaitMs ?? 5e3;
+    this.concurrency = Math.max(1, Math.floor(concurrency ?? 1));
+    this.handlerTimeoutMs = handlerTimeoutMs ?? 0;
+    this.onError = onError;
+    this.handle("echo", (params) => params);
+    this.handle("platform.info", () => ({
+      node_id: this.nodeID,
+      platform: this.platform,
+      agent: { runtime: "typescript", version: SDK_VERSION }
+    }));
+  }
+  /** Registers a handler. Built-ins echo/platform.info can be overridden. */
+  handle(method, handler) {
+    this.handlers.set(method, handler);
+    return this;
+  }
+  get clientRef() {
+    return this.client;
+  }
+  /** Current registered node id (undefined before registration). */
+  get nodeID() {
+    return this.node?.id ?? this.nodeIdOpt;
+  }
+  /** Snapshot of the registered node. */
+  get nodeInfo() {
+    return this.node ? { ...this.node } : void 0;
+  }
+  /** Stops a running agent (run() resolves after cleanup). */
+  stop() {
+    this.controller?.abort();
+  }
+  /**
+   * Registers and serves commands until the signal aborts (or stop() runs).
+   * Initial registration retries with exponential backoff.
+   */
+  async run(signal) {
+    if (this.running) throw new Error("agent is already running");
+    this.running = true;
+    const controller = new AbortController();
+    this.controller = controller;
+    const forward = () => controller.abort();
+    signal?.addEventListener("abort", forward, { once: true });
+    if (signal?.aborted) controller.abort();
+    try {
+      if (this.ownClient) await this.client.open();
+      await this.registerWithRetry(controller.signal);
+      if (controller.signal.aborted) return;
+      const loops = [this.heartbeatLoop(controller.signal)];
+      for (let i = 0; i < this.concurrency; i++) loops.push(this.pullLoop(controller.signal));
+      await new Promise((resolve) => {
+        if (controller.signal.aborted) return resolve();
+        controller.signal.addEventListener("abort", () => resolve(), { once: true });
+      });
+      await Promise.allSettled(loops);
+      await this.unregister();
+    } finally {
+      signal?.removeEventListener("abort", forward);
+      this.running = false;
+      this.controller = void 0;
+      if (this.ownClient) await this.client.close();
+    }
+  }
+  report(err) {
+    if (this.onError && !isAbort(err)) this.onError(err);
+  }
+  registerParams() {
+    const p = { platform: this.platform };
+    if (this.nodeID) p.node_id = this.nodeID;
+    if (this.name) p.name = this.name;
+    if (this.capabilities.length) p.capabilities = this.capabilities;
+    if (this.tags.length) p.tags = this.tags;
+    if (this.metadata) p.metadata = this.metadata;
+    return p;
+  }
+  async registerOnce(signal) {
+    if (signal.aborted) return;
+    const res = await this.client.nodeRegister(this.registerParams());
+    if (res.node) this.node = res.node;
+  }
+  async registerWithRetry(signal) {
+    let delay = 1e3;
+    for (; ; ) {
+      try {
+        await this.registerOnce(signal);
+        return;
+      } catch (err) {
+        if (signal.aborted) return;
+        this.report(err);
+        try {
+          await sleep(delay, signal);
+        } catch {
+          return;
+        }
+        delay = Math.min(delay * 2, 3e4);
+      }
+    }
+  }
+  /** Single-flight re-registration after node.not_found / node.offline. */
+  ensureRegistered(signal) {
+    if (!this.regPromise) {
+      this.regPromise = this.registerOnce(signal).catch((err) => this.report(err)).finally(() => {
+        this.regPromise = void 0;
+      });
+    }
+    return this.regPromise;
+  }
+  async heartbeatLoop(signal) {
+    for (; ; ) {
+      try {
+        await sleep(this.heartbeatMs, signal);
+      } catch {
+        return;
+      }
+      const id = this.nodeID;
+      if (!id || signal.aborted) continue;
+      try {
+        await this.client.nodeHeartbeat(id);
+      } catch (err) {
+        if (signal.aborted) return;
+        if (isNodeGone(err)) await this.ensureRegistered(signal);
+        else this.report(err);
+      }
+    }
+  }
+  async pullLoop(signal) {
+    let backoff = 1e3;
+    while (!signal.aborted) {
+      const id = this.nodeID;
+      if (!id) {
+        try {
+          await sleep(backoff, signal);
+        } catch {
+          return;
+        }
+        continue;
+      }
+      try {
+        const res = await this.client.commandPull({ node_id: id, limit: 1, wait: this.pullWaitMs });
+        backoff = 1e3;
+        const commands = res.commands ?? [];
+        if (commands.length === 0) {
+          try {
+            await sleep(50, signal);
+          } catch {
+            return;
+          }
+          continue;
+        }
+        for (const command of commands) {
+          await this.execute(command, signal);
+        }
+      } catch (err) {
+        if (signal.aborted) return;
+        if (isNodeGone(err)) {
+          await this.ensureRegistered(signal);
+          continue;
+        }
+        this.report(err);
+        try {
+          await sleep(backoff, signal);
+        } catch {
+          return;
+        }
+        backoff = Math.min(backoff * 2, 3e4);
+      }
+    }
+  }
+  async execute(command, signal) {
+    const handler = this.handlers.get(command.method ?? "");
+    if (!handler) {
+      await this.complete(command, signal, "failed", void 0, {
+        code: -32601,
+        message: `method not supported: ${command.method ?? ""}`
+      });
+      return;
+    }
+    const exec = new AbortController();
+    const forward = () => exec.abort();
+    signal.addEventListener("abort", forward, { once: true });
+    let timer;
+    try {
+      const invocation = Promise.resolve(
+        handler(command.params ?? {}, { command, signal: exec.signal })
+      );
+      let result;
+      if (this.handlerTimeoutMs > 0) {
+        const timeout = new Promise((_, reject) => {
+          timer = setTimeout(() => {
+            exec.abort();
+            reject(new AgentHandlerError(-32603, `handler timed out after ${this.handlerTimeoutMs}ms`));
+          }, this.handlerTimeoutMs);
+        });
+        result = await Promise.race([invocation, timeout]);
+      } else {
+        result = await invocation;
+      }
+      await this.complete(command, signal, "succeeded", result);
+    } catch (err) {
+      const error = toCommandError(err);
+      await this.complete(command, signal, "failed", void 0, error);
+    } finally {
+      if (timer) clearTimeout(timer);
+      signal.removeEventListener("abort", forward);
+    }
+  }
+  async complete(command, signal, status, result, error) {
+    if (!command.id || !command.node_id) return;
+    try {
+      await this.client.commandComplete({
+        node_id: command.node_id,
+        command_id: command.id,
+        status,
+        ...result !== void 0 ? { result } : {},
+        ...error ? { error } : {}
+      });
+    } catch (err) {
+      if (!signal.aborted) this.report(err);
+    }
+  }
+  async unregister() {
+    const id = this.nodeID;
+    if (!id) return;
+    try {
+      await this.client.nodeUnregister(id);
+    } catch (err) {
+      this.report(err);
+    }
+  }
+};
+
 // src/electron.ts
 function createMainBridge(client) {
   return {
@@ -1575,6 +1929,8 @@ var EVENT_TYPES = [
   "task.cancelled"
 ];
 
+exports.Agent = Agent;
+exports.AgentHandlerError = AgentHandlerError;
 exports.EVENT_TYPES = EVENT_TYPES;
 exports.HUB_CODES = HUB_CODES;
 exports.HttpTransport = HttpTransport;
@@ -1588,6 +1944,7 @@ exports.SDK_VERSION = SDK_VERSION;
 exports.WebSocketTransport = WebSocketTransport;
 exports.createMainBridge = createMainBridge;
 exports.createPreloadAPI = createPreloadAPI;
+exports.detectPlatform = detectPlatform2;
 exports.eventsUrl = eventsUrl;
 exports.isHubError = isHubError;
 exports.normalizeBaseUrl = normalizeBaseUrl;

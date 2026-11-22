@@ -37,7 +37,8 @@
         "rate_limited": { "const": -32041 },
         "seat_not_found": { "const": -32050 },
         "seat_occupied": { "const": -32051 },
-        "seat_expect_mismatch": { "const": -32052 }
+        "seat_expect_mismatch": { "const": -32052 },
+        "seat_vacant": { "const": -32053 }
       }
     }
   }

@@ -37,6 +37,7 @@ const (
 	ErrSeatNotFound            = -32050
 	ErrSeatOccupied            = -32051
 	ErrSeatExpectMismatch      = -32052
+	ErrSeatVacant              = -32053
 )
 
 // HubError is a JSON-RPC error returned by the hub. It is returned as an error

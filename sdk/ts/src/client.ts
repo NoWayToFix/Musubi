@@ -6,6 +6,13 @@ import type {
   CommandBatchResult,
   CommandCancelParams,
   CommandCancelResult,
+  CommandCompleteParams,
+  CommandCompleteResult,
+  CommandGetResult,
+  CommandListParams,
+  CommandListResult,
+  CommandPullParams,
+  CommandPullResult,
   CommandSendParams,
   CommandSendResult,
   CommandSpec,
@@ -14,6 +21,8 @@ import type {
   LoginParams,
   NodeFilter,
   NodeGetResult,
+  NodeRegisterParams,
+  NodeRegisterResult,
   NodeListParams,
   NodeListResult,
   NodeSubscribeParams,
@@ -49,7 +58,7 @@ import { HttpTransport } from './transports/http';
 import { PollTransport } from './transports/poll';
 
 /** Version of this SDK (mirrors package.json). */
-export const SDK_VERSION = '1.0.0';
+export const SDK_VERSION = '1.1.0';
 
 const DEFAULT_TRANSPORT_ORDER: TransportKind[] = ['ws', 'http', 'poll'];
 const QUEUE_LIMIT = 1000;
@@ -838,6 +847,19 @@ export class HubClient {
     });
   }
 
+  /** Register or refresh this platform as a real node (PROTOCOL.md §5). */
+  nodeRegister(params: NodeRegisterParams): Promise<NodeRegisterResult> {
+    return this.request<NodeRegisterResult>('node.register', { ...params });
+  }
+
+  nodeHeartbeat(nodeId: string): Promise<NodeRegisterResult> {
+    return this.request<NodeRegisterResult>('node.heartbeat', { node_id: nodeId });
+  }
+
+  nodeUnregister(nodeId: string): Promise<NodeRegisterResult> {
+    return this.request<NodeRegisterResult>('node.unregister', { node_id: nodeId });
+  }
+
   nodeList(filter?: NodeFilter, limit?: number, offset?: number): Promise<NodeListResult> {
     const params: NodeListParams = {};
     if (filter) params['filter'] = filter;
@@ -862,13 +884,32 @@ export class HubClient {
 
   commandSend(spec: CommandSendParams): Promise<CommandSendResult> {
     const params: CommandSendParams = {
-      node_id: spec.node_id,
+      ...(spec.node_id !== undefined ? { node_id: spec.node_id } : {}),
+      ...(spec.seat_id !== undefined ? { seat_id: spec.seat_id } : {}),
       method: spec.method,
       ...(spec.params !== undefined ? { params: spec.params } : {}),
       ...(spec.timeout !== undefined ? { timeout: spec.timeout } : {}),
       ...(spec.idempotency_key !== undefined ? { idempotency_key: spec.idempotency_key } : {})
     };
     return this.request<CommandSendResult>('command.send', params);
+  }
+
+  /** command.pull: claim queued commands as a real node (long-poll via wait). */
+  commandPull(params: CommandPullParams): Promise<CommandPullResult> {
+    return this.request<CommandPullResult>('command.pull', params);
+  }
+
+  /** command.complete: report a pulled command's terminal state. */
+  commandComplete(params: CommandCompleteParams): Promise<CommandCompleteResult> {
+    return this.request<CommandCompleteResult>('command.complete', params);
+  }
+
+  commandGet(commandId: string): Promise<CommandGetResult> {
+    return this.request<CommandGetResult>('command.get', { command_id: commandId });
+  }
+
+  commandList(params: CommandListParams = {}): Promise<CommandListResult> {
+    return this.request<CommandListResult>('command.list', params);
   }
 
   commandBatch(specs: CommandSpec[], idempotencyKey?: string): Promise<CommandBatchResult> {

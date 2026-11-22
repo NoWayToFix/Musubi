@@ -33,6 +33,19 @@ node_modules/
 __pycache__/
 *.pyc
 
+# Local AI tooling state
+# Claude Code sessions/settings, skills installed by `npx skills`,
+# and the throwaway browser profile used while shooting the console.
+/.claude/
+/.claude.json
+/.agents/
+/.taste-skill/
+/skills-lock.json
+
+# Local build outputs
+/engine/hubd
+/examples/worker/worker
+
 # Editor/IDE
 # .idea/
 # .vscode/

@@ -57,6 +57,26 @@
       "additionalProperties": true
     },
     "auth_logout_params": { "type": "object", "additionalProperties": true },
+    "node_register_params": {
+      "type": "object",
+      "description": "node.register: register or refresh a real node over JSON-RPC (mirrors POST /v1/register). node_id is optional; the engine generates one when absent.",
+      "properties": {
+        "node_id": { "type": "string" },
+        "id": { "type": "string", "description": "Alias for node_id (HTTP /v1/register compatibility)." },
+        "name": { "type": "string" },
+        "capabilities": { "type": "array", "items": { "type": "string" } },
+        "tags": { "type": "array", "items": { "type": "string" } },
+        "metadata": { "type": "object", "additionalProperties": true },
+        "platform": { "$ref": "node.json#/$defs/platform" }
+      },
+      "additionalProperties": true
+    },
+    "node_register_result": {
+      "type": "object",
+      "required": ["node"],
+      "properties": { "node": { "$ref": "node.json" } },
+      "additionalProperties": true
+    },
     "node_list_params": {
       "type": "object",
       "properties": {
@@ -64,7 +84,10 @@
           "type": "object",
           "properties": {
             "status": { "type": "string" },
-            "tags": { "type": "array", "items": { "type": "string" } }
+            "tags": { "type": "array", "items": { "type": "string" } },
+            "runtime": { "type": "string", "description": "Exact match on platform.runtime (e.g. go, node, python, browser, demo)." },
+            "platform": { "type": "string", "description": "Alias for runtime." },
+            "os": { "type": "string", "description": "Exact match on platform.os." }
           },
           "additionalProperties": true
         },
@@ -114,9 +137,11 @@
     "unsubscribe_result": { "type": "object", "additionalProperties": true },
     "command_send_params": {
       "type": "object",
-      "required": ["node_id", "method"],
+      "description": "Exactly one of node_id / seat_id addresses the executor (PROTOCOL.md §4.7).",
+      "required": ["method"],
       "properties": {
         "node_id": { "type": "string" },
+        "seat_id": { "type": "string", "description": "Route to the node currently occupying this seat." },
         "method": { "type": "string" },
         "params": { "type": "object" },
         "timeout": { "type": "integer", "minimum": 0, "default": 30000 },
@@ -138,9 +163,10 @@
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["node_id", "method"],
+            "required": ["method"],
             "properties": {
               "node_id": { "type": "string" },
+              "seat_id": { "type": "string" },
               "method": { "type": "string" },
               "params": { "type": "object" },
               "timeout": { "type": "integer", "minimum": 0 }
@@ -173,6 +199,80 @@
       "properties": { "command": { "$ref": "command.json" } },
       "additionalProperties": true
     },
+    "command_get_params": {
+      "type": "object",
+      "required": ["command_id"],
+      "properties": { "command_id": { "type": "string" } },
+      "additionalProperties": true
+    },
+    "command_get_result": {
+      "type": "object",
+      "required": ["command"],
+      "properties": { "command": { "$ref": "command.json" } },
+      "additionalProperties": true
+    },
+    "command_list_params": {
+      "type": "object",
+      "properties": {
+        "filter": {
+          "type": "object",
+          "properties": {
+            "status": { "type": "string" },
+            "node_id": { "type": "string" },
+            "task_id": { "type": "string" }
+          },
+          "additionalProperties": true
+        },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 100 },
+        "offset": { "type": "integer", "minimum": 0, "default": 0 }
+      },
+      "additionalProperties": true
+    },
+    "command_list_result": {
+      "type": "object",
+      "required": ["commands", "total"],
+      "properties": {
+        "commands": { "type": "array", "items": { "$ref": "command.json" } },
+        "total": { "type": "integer" }
+      },
+      "additionalProperties": true
+    },
+    "command_pull_params": {
+      "type": "object",
+      "required": ["node_id"],
+      "properties": {
+        "node_id": { "type": "string" },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 32, "default": 1 },
+        "wait": { "type": "integer", "minimum": 0, "maximum": 30000, "default": 0, "description": "Long-poll milliseconds." }
+      },
+      "additionalProperties": true
+    },
+    "command_pull_result": {
+      "type": "object",
+      "required": ["commands"],
+      "properties": {
+        "commands": { "type": "array", "items": { "$ref": "command.json" } }
+      },
+      "additionalProperties": true
+    },
+    "command_complete_params": {
+      "type": "object",
+      "required": ["node_id", "command_id", "status"],
+      "properties": {
+        "node_id": { "type": "string" },
+        "command_id": { "type": "string" },
+        "status": { "enum": ["succeeded", "failed", "cancelled", "timeout"] },
+        "result": {},
+        "error": { "$ref": "common.json#/definitions/error_object" }
+      },
+      "additionalProperties": true
+    },
+    "command_complete_result": {
+      "type": "object",
+      "required": ["command"],
+      "properties": { "command": { "$ref": "command.json" } },
+      "additionalProperties": true
+    },
     "task_create_params": {
       "type": "object",
       "required": ["name", "commands"],
@@ -183,9 +283,10 @@
           "minItems": 1,
           "items": {
             "type": "object",
-            "required": ["node_id", "method"],
+            "required": ["method"],
             "properties": {
               "node_id": { "type": "string" },
+              "seat_id": { "type": "string" },
               "method": { "type": "string" },
               "params": { "type": "object" },
               "timeout": { "type": "integer", "minimum": 0 }

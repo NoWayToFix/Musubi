@@ -96,15 +96,53 @@ Fallback order is `ws → sse → poll`, chosen by `transportOrder ∩ server_in
   (the engine returns a NEW access_token AND a NEW refresh_token and invalidates
   the old pair; a rejected refresh token is dropped so the next attempt
   re-logins instead of replaying a dead token)
+- `nodeRegister(params)`, `nodeHeartbeat(id)`, `nodeUnregister(id)`
 - `nodeList(filter?, limit?, offset?)`, `nodeGet(id)`, `nodeSubscribe(id?)`,
-  `nodeUnsubscribe(subId)`
-- `commandSend(spec)`, `commandBatch(specs, key?)`, `commandCancel(id)`
+  `nodeUnsubscribe(subId)` — `filter` supports `status`, `tags`, `runtime`, `os`
+- `Agent` / `detectPlatform` — real-node worker runtime (see Agent section)
+- `commandSend(spec)`, `commandBatch(specs, key?)`, `commandCancel(id)`, `commandGet(id)`, `commandList(params?)`
+- `commandPull({node_id, limit?, wait?})` / `commandComplete({node_id, command_id, status, result?, error?})` — 真实节点 worker 的拉取式下发
+- 指令寻址：`commandSend({seat_id, ...})` 可按席位下发（与 `node_id` 互斥）
 - `taskCreate(spec)`, `taskGet(id)`, `taskList(filter?, limit?, offset?)`,
   `taskCancel(id)`, `taskSubscribe(id?)`
 - `eventSubscribe(filters?)` → `Subscription`, `eventUnsubscribe(subId)`
 - `subscribeEvents(filters?)` → `Subscription` (auto-restored after reconnect),
   `onNode(nodeId?)`, `onTask(taskId?)`
 - Events: `client.on(type | '*', handler)` / `off(type, handler)`
+
+## Agent（节点运行时）
+
+`Agent` 实现 PROTOCOL.md §5.4 的完整生命周期，是"一个平台一份 SDK"的接入入口：
+
+```ts
+import { Agent, AgentHandlerError } from '@musubi/hub-sdk';
+
+const agent = new Agent({
+  url: 'http://127.0.0.1:8080',
+  nodeId: 'node-app-1',
+  capabilities: ['echo', 'sys.info'],
+  tags: ['node', 'prod'],
+  concurrency: 2,
+  pullWaitMs: 5000,
+  onError: (err) => console.error(err)
+});
+agent.handle('sys.info', async (params) => collectSysInfo());
+agent.handle('fail', async (params) => {
+  throw new AgentHandlerError(-32603, params.message ?? 'failed');
+});
+
+await agent.run();      // 注册 → 心跳 → pull → 执行 → complete → 注销
+// agent.stop()         从其他代码停止
+```
+
+- **同构**：Node / Deno / Bun / Electron / 浏览器共用同一实现；`detectPlatform()`
+  自动识别 `node|deno|bun|electron|browser`，也可通过 `platform` 覆盖。
+- **内置方法**：`echo`、`platform.info`。
+- **失败语义**：handler 抛错 → `failed`；`AgentHandlerError(code, message)` 指定错误码；
+  未注册方法 → `-32601`。
+- **自愈**：注册指数退避；`-32010`/`-32011` 自动重新注册；`stop()`/AbortSignal 触发注销。
+
+示例：[`examples/agents/ts`](../../examples/agents/ts/)。
 
 ## Subscriptions & events
 

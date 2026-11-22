@@ -1,0 +1,384 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Musubi Control Center · 集控中心</title>
+  <meta name="description" content="Musubi 多平台集控中心：查看平台、节点、席位、指令、任务和事件流。">
+  <meta name="theme-color" content="#F4F1EA">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%231A1917'/%3E%3Ctext x='16' y='23' font-family='Georgia,serif' font-size='20' fill='%23F4F1EA' text-anchor='middle'%3EM%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<a class="skip-link" href="#main">跳到主要内容</a>
+
+<header class="masthead">
+  <div class="wrap masthead-inner">
+    <a class="brand" href="#overview" aria-label="Musubi 集控中心，回到概览">
+      <span class="brand-mark" aria-hidden="true">M</span>
+      <h1 class="brand-name"><span class="brand-word">Musubi</span> <span class="brand-sub">集控中心</span></h1>
+    </a>
+    <div class="masthead-side">
+      <p id="engine-meta" class="masthead-meta">未连接</p>
+      <p class="connection" aria-live="polite">
+        <span id="status" class="status-square off" aria-hidden="true"></span>
+        <span id="status-text" class="status-word">未连接</span>
+      </p>
+      <button id="connect-toggle" class="btn btn-secondary btn-sm" type="button" aria-expanded="false" aria-controls="connect-panel">连接</button>
+    </div>
+  </div>
+</header>
+
+<div class="dateline">
+  <div class="wrap dateline-inner">
+    <p><span class="dateline-label">传输</span> <span id="transport-label">未连接</span><span class="sep">·</span><span id="dateline-detail">等待连接</span></p>
+    <div class="dateline-right">
+      <div class="pulse-wrap" title="过去 60 秒的真实事件；8 秒无事件后归零">
+        <span class="dateline-label">事件</span>
+        <div id="event-pulse" class="pulse" aria-hidden="true"></div>
+      </div>
+      <p><span class="dateline-label">会话</span> <span id="auth-mode">offline</span></p>
+    </div>
+  </div>
+</div>
+
+<section id="connect-panel" class="connect-panel" hidden aria-labelledby="connect-title">
+  <div class="wrap connect-grid">
+    <div>
+      <h2 id="connect-title">连接 Core</h2>
+      <p class="note">none 模式下凭证可留空；token 或 basic 模式需要填写凭证。</p>
+    </div>
+    <form id="connect-form" class="connect-form" autocomplete="off">
+      <label>用户名（basic 模式必填）
+        <input id="username" type="text" autocomplete="username" spellcheck="false">
+      </label>
+      <label>Token / 密码
+        <input id="token" type="password" autocomplete="current-password">
+      </label>
+      <div class="form-actions">
+        <button id="connect" class="btn btn-primary" type="submit">连接</button>
+        <button id="disconnect" class="btn btn-secondary" type="button" hidden>断开</button>
+      </div>
+      <p id="connect-result" class="result" role="status" aria-live="polite"></p>
+    </form>
+  </div>
+</section>
+
+<nav class="section-index" aria-label="主导航">
+  <div class="wrap section-index-inner">
+    <a href="#overview" data-tab="overview" class="index-link active" aria-current="page">概览</a>
+    <a href="#platforms" data-tab="platforms" class="index-link">平台</a>
+    <a href="#nodes" data-tab="nodes" class="index-link">节点</a>
+    <a href="#seats" data-tab="seats" class="index-link">席位</a>
+    <a href="#commands" data-tab="commands" class="index-link">指令</a>
+    <a href="#tasks" data-tab="tasks" class="index-link">任务</a>
+    <a href="#events" data-tab="events" class="index-link">事件流</a>
+    <a href="#rpc" data-tab="rpc" class="index-link">RPC</a>
+  </div>
+</nav>
+
+<main id="main" tabindex="-1">
+  <div class="wrap">
+    <div id="sync-banner" class="sync-banner" role="status" aria-live="polite" hidden>
+      <span id="sync-banner-label" class="sync-banner-label"></span>
+      <span id="sync-banner-text" class="sync-banner-text"></span>
+      <button class="text-action" type="button" data-refresh>刷新</button>
+    </div>
+    <section id="tab-overview" class="tab active" aria-labelledby="overview-h">
+      <h2 id="overview-h" class="visually-hidden">概览</h2>
+      <div class="ledger" aria-label="舰队计数">
+        <a class="ledger-cell" href="#platforms" title="平台分组数；未上报 platform.runtime 的节点计入「未上报」">
+          <span class="ledger-label">平台</span>
+          <span class="ledger-value" id="count-platforms">—</span>
+        </a>
+        <a class="ledger-cell" href="#nodes" title="全部节点">
+          <span class="ledger-label">节点</span>
+          <span class="ledger-value" id="count-nodes">—</span>
+        </a>
+        <a class="ledger-cell" href="#nodes" title="status 为 online 或 busy 的节点">
+          <span class="ledger-label">在线</span>
+          <span class="ledger-value"><span id="count-online">—</span><span class="ledger-denom">/ <span id="count-nodes-denom">—</span></span></span>
+        </a>
+        <a class="ledger-cell" href="#seats" title="全部席位">
+          <span class="ledger-label">席位</span>
+          <span class="ledger-value" id="count-seats">—</span>
+        </a>
+        <a class="ledger-cell" href="#seats" title="kind 为 standing 的常席">
+          <span class="ledger-label">常席</span>
+          <span class="ledger-value" id="count-standing">—</span>
+        </a>
+        <a class="ledger-cell" href="#tasks" title="status 为 running 的任务">
+          <span class="ledger-label">运行中</span>
+          <span class="ledger-value" id="count-tasks">—</span>
+        </a>
+        <a class="ledger-cell" href="#events" title="本次会话收到的事件">
+          <span class="ledger-label">事件</span>
+          <span class="ledger-value" id="count-events">—</span>
+        </a>
+      </div>
+
+      <div class="overview-split">
+        <section class="block" aria-labelledby="overview-platforms-h">
+          <div class="block-head">
+            <h2 id="overview-platforms-h">平台舰队</h2>
+            <button class="text-action" type="button" data-refresh>刷新</button>
+          </div>
+          <div id="overview-platforms" class="table-wrap"></div>
+        </section>
+
+        <section class="block" aria-labelledby="overview-events-h">
+          <div class="block-head">
+            <h2 id="overview-events-h">最近事件</h2>
+            <a class="text-action" href="#events">查看全部</a>
+          </div>
+          <div id="overview-events"></div>
+        </section>
+      </div>
+
+      <section class="block" aria-labelledby="overview-engine-h">
+        <div class="block-head">
+          <h2 id="overview-engine-h">引擎</h2>
+          <button id="info-toggle" class="text-action" type="button" aria-expanded="false" aria-controls="info-json">展开 engine.info</button>
+        </div>
+        <p class="note">协议版本、服务端信息与特性开关。展开查看完整 engine.info。</p>
+        <pre id="info-json" class="json" hidden>连接后显示</pre>
+      </section>
+    </section>
+
+    <section id="tab-platforms" class="tab" aria-labelledby="platforms-h">
+      <section class="block" aria-labelledby="platforms-h">
+        <div class="block-head">
+          <h2 id="platforms-h">平台舰队</h2>
+          <button class="text-action" type="button" data-refresh>刷新</button>
+        </div>
+        <div id="platform-cards" class="platform-grid"></div>
+        <p class="note">平台描述由节点在注册时自报。官方 SDK 的 Agent 会自动探测 OS、架构和运行时。</p>
+      </section>
+
+      <section class="block" aria-labelledby="platform-sdk-h">
+        <div class="block-head">
+          <h2 id="platform-sdk-h">SDK 接入</h2>
+        </div>
+        <dl class="sdk-list">
+          <div><dt>Go</dt><dd><code>agent := sdk.NewAgent(opts); agent.Handle("sys.info", fn); agent.Run(ctx)</code></dd></div>
+          <div><dt>Node.js / Deno / Bun / Electron</dt><dd><code>new Agent({url}).handle("sys.info", fn).run()</code></dd></div>
+          <div><dt>Python</dt><dd><code>agent = Agent(url=...); agent.handle("sys.info", fn); agent.start()</code></dd></div>
+          <div><dt>任意语言</dt><dd><code>node.register → node.heartbeat → command.pull → command.complete</code></dd></div>
+        </dl>
+      </section>
+    </section>
+
+    <section id="tab-nodes" class="tab" aria-labelledby="nodes-h">
+      <section class="block" aria-labelledby="nodes-h">
+        <div class="block-head">
+          <h2 id="nodes-h">节点</h2>
+          <button class="text-action" type="button" data-refresh>刷新</button>
+        </div>
+        <div class="filter-bar">
+          <label class="visually-hidden" for="nodes-filter-runtime">按平台过滤</label>
+          <select id="nodes-filter-runtime">
+            <option value="">全部平台</option>
+          </select>
+          <label class="visually-hidden" for="nodes-search">搜索节点</label>
+          <input id="nodes-search" type="search" placeholder="搜索 ID、名称或标签" autocomplete="off">
+          <p id="nodes-summary" class="filter-summary"></p>
+        </div>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead><tr><th>节点</th><th>平台</th><th>状态</th><th>标签</th><th>能力</th><th>席位</th><th class="num">最后心跳</th></tr></thead>
+            <tbody id="nodes-body"></tbody>
+          </table>
+        </div>
+        <p class="note">demo 节点由引擎进程内的模拟器执行。真实节点通过 SDK Agent 或 POST /v1/register 接入，再用 command.pull 领取指令。</p>
+      </section>
+    </section>
+
+    <section id="tab-seats" class="tab" aria-labelledby="seats-h">
+      <details class="create-block" id="seat-create">
+        <summary>创建虚席</summary>
+        <form id="seat-form" class="form-grid">
+          <label>名称
+            <input id="seat-name" type="text" placeholder="edge-worker-slot">
+          </label>
+          <label>补席策略
+            <select id="seat-policy"><option value="manual">manual</option><option value="auto">auto</option></select>
+          </label>
+          <label class="wide">期望画像 expect（JSON，可空）
+            <textarea id="seat-expect" rows="3" spellcheck="false" placeholder='{"capabilities":["shell.exec"],"tags":["linux"]}'></textarea>
+          </label>
+          <div class="wide form-actions"><button class="btn btn-primary" type="submit">创建席位</button></div>
+        </form>
+        <p id="seat-result" class="result" role="status" aria-live="polite"></p>
+      </details>
+
+      <section class="block" aria-labelledby="seats-h">
+        <div class="block-head">
+          <h2 id="seats-h">席位</h2>
+          <button class="text-action" type="button" data-refresh>刷新</button>
+        </div>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead><tr><th>ID</th><th>名称</th><th>类型</th><th>策略</th><th>占用节点</th><th>期望</th><th>操作</th></tr></thead>
+            <tbody id="seats-body"></tbody>
+          </table>
+        </div>
+        <p class="note">虚席是可预留的位置。绑定节点后成为常席；auto 策略会在匹配的节点注册时自动补席。退席后回到虚席。</p>
+      </section>
+    </section>
+
+    <section id="tab-commands" class="tab" aria-labelledby="commands-h">
+      <section class="block" aria-labelledby="commands-create-h">
+        <div class="block-head">
+          <h2 id="commands-create-h">下发指令</h2>
+        </div>
+        <form id="command-form" class="command-form">
+          <fieldset id="cmd-target-type" class="segmented">
+            <legend>寻址方式</legend>
+            <label><input type="radio" name="cmd-target-type" value="node" checked><span class="seg-option">node_id</span></label>
+            <label><input type="radio" name="cmd-target-type" value="seat"><span class="seg-option">seat_id</span></label>
+          </fieldset>
+          <label>目标 ID
+            <input id="cmd-target" type="text" list="cmd-target-list" placeholder="n-1" autocomplete="off" spellcheck="false" required>
+            <datalist id="cmd-target-list"></datalist>
+          </label>
+          <label>方法
+            <input id="cmd-method" type="text" value="echo" list="cmd-method-list" autocomplete="off" spellcheck="false" required>
+            <datalist id="cmd-method-list">
+              <option value="echo"></option>
+              <option value="sys.info"></option>
+              <option value="shell.exec"></option>
+            </datalist>
+          </label>
+          <label>超时 ms
+            <input id="cmd-timeout" type="number" min="0" step="1000" value="30000">
+          </label>
+          <label class="wide">params（JSON）
+            <textarea id="cmd-params" rows="3" spellcheck="false" placeholder='{"text":"hi"}'></textarea>
+          </label>
+          <div class="wide form-actions"><button class="btn btn-primary" type="submit">下发指令</button></div>
+        </form>
+        <p id="cmd-result" class="result" role="status" aria-live="polite"></p>
+      </section>
+
+      <section class="block" aria-labelledby="commands-h">
+        <div class="block-head">
+          <h2 id="commands-h">指令</h2>
+          <div class="head-actions">
+            <label class="visually-hidden" for="commands-filter-status">按状态过滤</label>
+            <select id="commands-filter-status">
+              <option value="">全部状态</option>
+              <option value="pending">等待</option>
+              <option value="accepted">已受理</option>
+              <option value="running">运行中</option>
+              <option value="succeeded">成功</option>
+              <option value="failed">失败</option>
+              <option value="cancelled">已取消</option>
+              <option value="timeout">超时</option>
+            </select>
+            <button class="text-action" type="button" data-refresh>刷新</button>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead><tr><th>指令</th><th>目标</th><th>方法</th><th>状态</th><th>结果 / 错误</th><th class="num">时间</th><th>操作</th></tr></thead>
+            <tbody id="commands-body"></tbody>
+          </table>
+        </div>
+        <p id="commands-note" class="table-note" hidden></p>
+      </section>
+    </section>
+
+    <section id="tab-tasks" class="tab" aria-labelledby="tasks-h">
+      <details class="create-block" id="task-create">
+        <summary>创建任务</summary>
+        <form id="task-form" class="form-grid">
+          <label>名称
+            <input id="task-name" type="text" placeholder="deploy">
+          </label>
+          <label class="checkbox-label"><input id="task-parallel" type="checkbox"> 并行执行</label>
+          <label class="wide">commands（JSON 数组）
+            <textarea id="task-commands" rows="3" spellcheck="false" placeholder='[{"node_id":"n-1","method":"echo","params":{"text":"hi"}}]'></textarea>
+          </label>
+          <div class="wide form-actions"><button class="btn btn-primary" type="submit">创建任务</button></div>
+        </form>
+        <p id="task-result" class="result" role="status" aria-live="polite"></p>
+      </details>
+
+      <section class="block" aria-labelledby="tasks-h">
+        <div class="block-head">
+          <h2 id="tasks-h">任务</h2>
+          <button class="text-action" type="button" data-refresh>刷新</button>
+        </div>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead><tr><th>任务</th><th>名称</th><th>状态</th><th>进度</th><th class="num">指令数</th><th class="num">更新时间</th><th>操作</th></tr></thead>
+            <tbody id="tasks-body"></tbody>
+          </table>
+        </div>
+        <p id="tasks-note" class="table-note" hidden></p>
+      </section>
+    </section>
+
+    <section id="tab-events" class="tab" aria-labelledby="events-h">
+      <section class="block" aria-labelledby="events-h">
+        <div class="block-head">
+          <h2 id="events-h">事件流</h2>
+          <div class="head-actions">
+            <span id="events-transport" class="mono muted">未连接</span>
+            <label class="checkbox-label"><input id="events-pause" type="checkbox"> 暂停渲染</label>
+            <button id="events-clear" class="text-action" type="button">清空</button>
+          </div>
+        </div>
+        <div class="filter-bar">
+          <label class="visually-hidden" for="events-filter">过滤事件</label>
+          <input id="events-filter" type="search" placeholder="按类型、节点、席位、任务或指令过滤" autocomplete="off">
+          <p id="events-summary" class="filter-summary"></p>
+        </div>
+        <div class="table-wrap">
+          <table class="data-table is-live">
+            <thead><tr><th class="num">时间</th><th>类型</th><th>节点 / 席位 / 任务 / 指令</th><th>data</th></tr></thead>
+            <tbody id="events-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+
+    <section id="tab-rpc" class="tab" aria-labelledby="rpc-h">
+      <section class="block" aria-labelledby="rpc-h">
+        <div class="block-head">
+          <h2 id="rpc-h">原始 JSON-RPC</h2>
+        </div>
+        <div class="rpc-grid">
+          <form id="rpc-form" class="rpc-form">
+            <label>方法
+              <input id="rpc-method" type="text" value="engine.info" autocomplete="off" spellcheck="false">
+            </label>
+            <label>params（JSON）
+              <textarea id="rpc-params" rows="5" spellcheck="false">{"client_info":{"protocol_versions":["1.0"]}}</textarea>
+            </label>
+            <div class="form-actions"><button id="rpc-invoke" class="btn btn-primary" type="submit">调用</button></div>
+          </form>
+          <div class="rpc-output">
+            <div class="code-head">
+              <span id="rpc-meta">响应</span>
+              <button id="rpc-copy" class="text-action" type="button">复制</button>
+            </div>
+            <pre id="rpc-output" class="json">—</pre>
+          </div>
+        </div>
+      </section>
+    </section>
+  </div>
+</main>
+
+<footer class="footer">
+  <div class="wrap footer-inner">
+    <span>Musubi Core</span>
+    <span id="footer-version">—</span>
+    <span>Apache-2.0</span>
+  </div>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>

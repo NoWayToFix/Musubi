@@ -20,9 +20,25 @@
       "description": "Free-form key/value metadata, reported by the node. Opaque to the engine.",
       "additionalProperties": true
     },
+    "platform": { "$ref": "#/$defs/platform" },
     "last_seen": { "$ref": "common.json#/definitions/timestamp" },
     "registered_at": { "$ref": "common.json#/definitions/timestamp" },
     "seat_id": { "type": "string", "description": "Id of the seat this node occupies (PROTOCOL.md §4.7); absent/null when unseated." }
   },
-  "additionalProperties": true
+  "additionalProperties": true,
+  "$defs": {
+    "platform": {
+      "type": "object",
+      "description": "Self-reported platform descriptor of the node (PROTOCOL.md §4.1). All fields optional; unknown values tolerated.",
+      "properties": {
+        "os": { "type": "string", "examples": ["linux", "darwin", "windows"] },
+        "arch": { "type": "string", "examples": ["amd64", "arm64", "x64"] },
+        "runtime": { "type": "string", "description": "go | node | deno | bun | browser | electron | python | demo; opaque to the engine." },
+        "runtime_version": { "type": "string" },
+        "agent_version": { "type": "string" },
+        "labels": { "type": "object", "additionalProperties": { "type": "string" } }
+      },
+      "additionalProperties": true
+    }
+  }
 }

@@ -54,8 +54,7 @@ TypeScript 额外断言重复取消返回 `-32030` 与 `client.close()` 后调�
 
 ## 3. 兼容性矩阵起爆
 
-`tests/compat/matrix_detonate.sh`：验证 PROTOCOL §8 兼容性铁律——
-未知请求字段忽略、未知方法 `-32601`、版本不匹配 `-32005`、SSE 事件流、长轮询结构、引擎重启后恢复、JSON-RPC 数组批处理。
+`tests/compat/matrix_detonate.sh`：验证 PROTOCOL §8 兼容性铁律，包括未知请求字段忽略、未知方法 `-32601`、版本不匹配 `-32005`、SSE 事件流、长轮询结构、引擎重启后恢复、JSON-RPC 数组批处理。
 
 ## 手工起爆（引擎独立运行时）
 

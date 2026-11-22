@@ -22,7 +22,7 @@
         "$.node.id": "n-1",
         "$.node.name": "worker-1",
         "$.node.status": "online",
-        "$.node.capabilities.length": 2
+        "$.node.capabilities.length": 1
       }
     }
   },

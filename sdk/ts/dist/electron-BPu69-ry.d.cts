@@ -38,6 +38,12 @@ interface RpcNotification {
 /** A single envelope or a batch (array) of envelopes. */
 type RpcMessage = RpcRequest | RpcResponse | RpcNotification | RpcMessage[];
 type NodeStatus = 'online' | 'busy' | 'offline' | 'unknown';
+/** Self-reported platform descriptor of a node (PROTOCOL.md §4.1). */
+interface NodePlatform extends PlatformInfo {
+    runtime_version?: string;
+    agent_version?: string;
+    labels?: Record<string, string>;
+}
 /** A controlled node. `capabilities`/`tags`/`metadata` are opaque to the engine. */
 interface Node {
     id?: string;
@@ -46,9 +52,32 @@ interface Node {
     capabilities?: string[];
     tags?: string[];
     metadata?: Record<string, unknown>;
+    platform?: NodePlatform;
     last_seen?: Timestamp;
     registered_at?: Timestamp;
     seat_id?: string;
+    [key: string]: unknown;
+}
+/** node.register parameter: join the control center over JSON-RPC. */
+interface NodeRegisterParams {
+    node_id?: string;
+    name?: string;
+    capabilities?: string[];
+    tags?: string[];
+    metadata?: Record<string, unknown>;
+    platform?: NodePlatform;
+    [key: string]: unknown;
+}
+interface NodeRegisterResult {
+    node?: Node;
+    [key: string]: unknown;
+}
+interface NodeHeartbeatParams {
+    node_id: string;
+    [key: string]: unknown;
+}
+interface NodeUnregisterParams {
+    node_id: string;
     [key: string]: unknown;
 }
 /** Expected profile a filling node must match (PROTOCOL.md §4.7). */
@@ -96,6 +125,8 @@ type CommandStatus = 'pending' | 'accepted' | 'running' | 'succeeded' | 'failed'
 interface Command {
     id?: string;
     node_id?: string;
+    /** Routing seat, set when the command was addressed by seat_id. */
+    seat_id?: string | null;
     method?: string;
     params?: Record<string, unknown>;
     status?: CommandStatus;
@@ -202,6 +233,12 @@ interface AuthResult {
 interface NodeFilter {
     status?: string;
     tags?: string[];
+    /** Exact match on platform.runtime (go, node, python, browser, demo, ...). */
+    runtime?: string;
+    /** Alias for runtime. */
+    platform?: string;
+    /** Exact match on platform.os. */
+    os?: string;
     [key: string]: unknown;
 }
 interface NodeListParams {
@@ -238,10 +275,57 @@ interface UnsubscribeResult {
 /** A command to dispatch (command.send / command.batch / task.create). */
 interface CommandSpec {
     node_id?: string;
+    /** Address a seat instead of a node (mutually exclusive with node_id). */
+    seat_id?: string;
     method?: string;
     params?: Record<string, unknown>;
     timeout?: number;
     idempotency_key?: string;
+    [key: string]: unknown;
+}
+/** command.pull: real-node worker claims queued commands. */
+interface CommandPullParams {
+    node_id?: string;
+    limit?: number;
+    /** Long-poll milliseconds (0 = immediate). */
+    wait?: number;
+    [key: string]: unknown;
+}
+interface CommandPullResult {
+    commands?: Command[];
+    [key: string]: unknown;
+}
+/** command.complete: report a pulled command's terminal state. */
+interface CommandCompleteParams {
+    node_id?: string;
+    command_id?: string;
+    status?: CommandStatus;
+    result?: unknown;
+    error?: ErrorData | null;
+    [key: string]: unknown;
+}
+interface CommandCompleteResult {
+    command?: Command;
+    [key: string]: unknown;
+}
+interface CommandGetResult {
+    command?: Command;
+    [key: string]: unknown;
+}
+interface CommandListParams {
+    filter?: {
+        status?: string;
+        node_id?: string;
+        task_id?: string;
+        [key: string]: unknown;
+    };
+    limit?: number;
+    offset?: number;
+    [key: string]: unknown;
+}
+interface CommandListResult {
+    commands?: Command[];
+    total?: number;
     [key: string]: unknown;
 }
 interface CommandSendParams extends CommandSpec {
@@ -371,7 +455,7 @@ interface RequestOptions {
 }
 
 /** Version of this SDK (mirrors package.json). */
-declare const SDK_VERSION = "1.0.0";
+declare const SDK_VERSION = "1.1.0";
 /**
  * HubClient — the Control Hub SDK entry point.
  *
@@ -493,11 +577,21 @@ declare class HubClient {
     login(params?: LoginParams): Promise<AuthResult>;
     refresh(): Promise<AuthResult>;
     logout(): Promise<UnsubscribeResult>;
+    /** Register or refresh this platform as a real node (PROTOCOL.md §5). */
+    nodeRegister(params: NodeRegisterParams): Promise<NodeRegisterResult>;
+    nodeHeartbeat(nodeId: string): Promise<NodeRegisterResult>;
+    nodeUnregister(nodeId: string): Promise<NodeRegisterResult>;
     nodeList(filter?: NodeFilter, limit?: number, offset?: number): Promise<NodeListResult>;
     nodeGet(nodeId: string): Promise<NodeGetResult>;
     nodeSubscribe(nodeId?: string): Promise<SubscribeResult>;
     nodeUnsubscribe(subscriptionId: string): Promise<UnsubscribeResult>;
     commandSend(spec: CommandSendParams): Promise<CommandSendResult>;
+    /** command.pull: claim queued commands as a real node (long-poll via wait). */
+    commandPull(params: CommandPullParams): Promise<CommandPullResult>;
+    /** command.complete: report a pulled command's terminal state. */
+    commandComplete(params: CommandCompleteParams): Promise<CommandCompleteResult>;
+    commandGet(commandId: string): Promise<CommandGetResult>;
+    commandList(params?: CommandListParams): Promise<CommandListResult>;
     commandBatch(specs: CommandSpec[], idempotencyKey?: string): Promise<CommandBatchResult>;
     commandCancel(commandId: string): Promise<CommandCancelResult>;
     taskCreate(spec: TaskCreateParams): Promise<TaskCreateResult>;
@@ -567,4 +661,4 @@ interface PreloadApi {
  */
 declare function createPreloadAPI(): PreloadApi;
 
-export { type TaskStatus as $, type AuthResult as A, type RpcRequest as B, type CapabilitiesResult as C, type RpcResponse as D, type ErrorData as E, type ServerInfo as F, type SessionInfo as G, type HubEvent as H, type SubscribeParams as I, type SubscribeResult as J, type Subscription as K, type LoginParams as L, type MainBridge as M, type Node as N, type Task as O, type PingResult as P, type TaskCancelParams as Q, type RequestOptions as R, SDK_VERSION as S, type TransportKind as T, type TaskCancelResult as U, type TaskCreateParams as V, type TaskCreateResult as W, type TaskGetParams as X, type TaskGetResult as Y, type TaskListParams as Z, type TaskListResult as _, type Capability as a, type TaskSubscribeParams as a0, type Timestamp as a1, type UnsubscribeParams as a2, type UnsubscribeResult as a3, createMainBridge as a4, createPreloadAPI as a5, type ClientInfo as b, type Command as c, type CommandBatchParams as d, type CommandBatchResult as e, type CommandCancelParams as f, type CommandCancelResult as g, type CommandSendParams as h, type CommandSendResult as i, type CommandSpec as j, type CommandStatus as k, type EventSubscribeParams as l, type EventType as m, HubClient as n, type HubClientOptions as o, type NodeFilter as p, type NodeGetResult as q, type NodeListParams as r, type NodeListResult as s, type NodeStatus as t, type NodeSubscribeParams as u, type PlatformInfo as v, type PreloadApi as w, type RpcId as x, type RpcMessage as y, type RpcNotification as z };
+export { type TaskCreateResult as $, type AuthResult as A, type PlatformInfo as B, type Command as C, type PreloadApi as D, type ErrorData as E, type RpcId as F, type RpcMessage as G, type HubClientOptions as H, type RpcNotification as I, type RpcRequest as J, type RpcResponse as K, type LoginParams as L, type MainBridge as M, type NodePlatform as N, type ServerInfo as O, type PingResult as P, type SessionInfo as Q, type RequestOptions as R, SDK_VERSION as S, type TransportKind as T, type SubscribeParams as U, type SubscribeResult as V, type Subscription as W, type Task as X, type TaskCancelParams as Y, type TaskCancelResult as Z, type TaskCreateParams as _, HubClient as a, type TaskGetParams as a0, type TaskGetResult as a1, type TaskListParams as a2, type TaskListResult as a3, type TaskStatus as a4, type TaskSubscribeParams as a5, type Timestamp as a6, type UnsubscribeParams as a7, type UnsubscribeResult as a8, createMainBridge as a9, createPreloadAPI as aa, type Node as b, type HubEvent as c, type CapabilitiesResult as d, type Capability as e, type ClientInfo as f, type CommandBatchParams as g, type CommandBatchResult as h, type CommandCancelParams as i, type CommandCancelResult as j, type CommandSendParams as k, type CommandSendResult as l, type CommandSpec as m, type CommandStatus as n, type EventSubscribeParams as o, type EventType as p, type NodeFilter as q, type NodeGetResult as r, type NodeHeartbeatParams as s, type NodeListParams as t, type NodeListResult as u, type NodeRegisterParams as v, type NodeRegisterResult as w, type NodeStatus as x, type NodeSubscribeParams as y, type NodeUnregisterParams as z };

@@ -32,6 +32,9 @@ follow that document.
 - Compatibility: unknown response/event fields are ignored, missing fields are
   tolerated, unknown event types are delivered as-is (consumers must ignore
   them, §4.5).
+- **Agent runtime**: `NewAgent` turns any Go program into a controlled node
+  (register → heartbeat → pull → execute → complete → unregister) with
+  automatic `platform` detection — see [Agent](#agent) below.
 
 ## Usage
 
@@ -87,6 +90,65 @@ func main() {
     }
 }
 ```
+
+## Seats and real-node dispatch
+
+```go
+// Address a seat instead of a node (SeatID and NodeID are mutually exclusive).
+cmd, err := c.CommandSend(ctx, sdk.CommandSpec{
+    SeatID: "s-...", Method: "echo", Params: map[string]any{"text": "hi"},
+})
+list, err := c.CommandList(ctx, map[string]any{"status": "succeeded"}, 20, 0)
+
+// Real-node worker loop: claim, execute, complete.
+cmds, err := c.CommandPull(ctx, "w-1", 4, 5000) // limit 4, long-poll 5s
+for _, cmd := range cmds {
+    result, execErr := runLocally(cmd.Method, cmd.Params)
+    if execErr != nil {
+        _, err = c.CommandComplete(ctx, sdk.CommandCompleteParams{
+            NodeID: "w-1", CommandID: cmd.ID, Status: "failed",
+            Error: &sdk.CommandError{Code: -32000, Message: execErr.Error()},
+        })
+        continue
+    }
+    _, err = c.CommandComplete(ctx, sdk.CommandCompleteParams{
+        NodeID: "w-1", CommandID: cmd.ID, Status: "succeeded", Result: result,
+    })
+}
+```
+
+## Agent（节点运行时）
+
+`NewAgent` 实现 PROTOCOL.md §5.4 的完整生命周期，是"一个平台一份 SDK"的接入入口：
+
+```go
+ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+defer stop()
+
+agent := sdk.NewAgent(sdk.AgentOptions{
+    URL:          "http://127.0.0.1:8080",
+    NodeID:       "app-1",
+    Capabilities: []string{"echo", "sys.info"},
+    Tags:         []string{"linux", "prod"},
+    Concurrency:  2,               // 并行 pull 循环
+    PullWait:     5000,            // 长轮询毫秒
+    OnError:      func(err error) { log.Println(err) },
+})
+agent.Handle("sys.info", func(ctx context.Context, params map[string]any) (any, error) {
+    return collectSysInfo(), nil
+})
+if err := agent.Run(ctx); err != nil { log.Fatal(err) }
+```
+
+- **自动平台探测**：`DetectPlatform()` 上报 `os/arch/runtime=go/runtime_version/agent_version`；
+  可用 `AgentOptions.Platform` 覆盖，`Labels` 追加平台标签。
+- **内置方法**：`echo`（回显 params）与 `platform.info`；用户 handler 可覆盖。
+- **失败语义**：handler 返回 error → `command.complete(failed)`；返回
+  `*sdk.HandlerError{Code,Message}` 可指定错误码（默认 `-32603`）；未注册的方法 → `-32601`。
+- **自愈**：初始注册指数退避重试；心跳/拉取遇到 `-32010`/`-32011` 自动重新注册；
+  退出时 `node.unregister`，引擎回收未完成指令。
+
+完整示例：[`examples/agents/go`](../../examples/agents/go/)。
 
 ## Error handling
 

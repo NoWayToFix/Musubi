@@ -111,6 +111,9 @@ func (s *Subscription) Read(ctx context.Context) (*Event, bool) {
 
 type eventBus struct {
 	log *slog.Logger
+	// markDirty is called after every publish so the persistence layer learns
+	// about state changes without every registry knowing about it.
+	markDirty func()
 
 	mu      sync.RWMutex
 	nextID  atomic.Int64 // ev-N
@@ -219,6 +222,9 @@ func (b *eventBus) publish(ev *Event) {
 	select {
 	case b.notify <- struct{}{}:
 	default:
+	}
+	if b.markDirty != nil {
+		b.markDirty()
 	}
 }
 

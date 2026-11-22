@@ -1,5 +1,99 @@
-import { E as ErrorData, T as TransportKind, H as HubEvent } from './electron-CXxTIFbs.js';
-export { A as AuthResult, C as CapabilitiesResult, a as Capability, b as ClientInfo, c as Command, d as CommandBatchParams, e as CommandBatchResult, f as CommandCancelParams, g as CommandCancelResult, h as CommandSendParams, i as CommandSendResult, j as CommandSpec, k as CommandStatus, l as EventSubscribeParams, m as EventType, n as HubClient, o as HubClientOptions, L as LoginParams, M as MainBridge, N as Node, p as NodeFilter, q as NodeGetResult, r as NodeListParams, s as NodeListResult, t as NodeStatus, u as NodeSubscribeParams, P as PingResult, v as PlatformInfo, w as PreloadApi, R as RequestOptions, x as RpcId, y as RpcMessage, z as RpcNotification, B as RpcRequest, D as RpcResponse, S as SDK_VERSION, F as ServerInfo, G as SessionInfo, I as SubscribeParams, J as SubscribeResult, K as Subscription, O as Task, Q as TaskCancelParams, U as TaskCancelResult, V as TaskCreateParams, W as TaskCreateResult, X as TaskGetParams, Y as TaskGetResult, Z as TaskListParams, _ as TaskListResult, $ as TaskStatus, a0 as TaskSubscribeParams, a1 as Timestamp, a2 as UnsubscribeParams, a3 as UnsubscribeResult, a4 as createMainBridge, a5 as createPreloadAPI } from './electron-CXxTIFbs.js';
+import { H as HubClientOptions, a as HubClient, N as NodePlatform, C as Command, b as Node, E as ErrorData, T as TransportKind, c as HubEvent } from './electron-BPu69-ry.js';
+export { A as AuthResult, d as CapabilitiesResult, e as Capability, f as ClientInfo, g as CommandBatchParams, h as CommandBatchResult, i as CommandCancelParams, j as CommandCancelResult, k as CommandSendParams, l as CommandSendResult, m as CommandSpec, n as CommandStatus, o as EventSubscribeParams, p as EventType, L as LoginParams, M as MainBridge, q as NodeFilter, r as NodeGetResult, s as NodeHeartbeatParams, t as NodeListParams, u as NodeListResult, v as NodeRegisterParams, w as NodeRegisterResult, x as NodeStatus, y as NodeSubscribeParams, z as NodeUnregisterParams, P as PingResult, B as PlatformInfo, D as PreloadApi, R as RequestOptions, F as RpcId, G as RpcMessage, I as RpcNotification, J as RpcRequest, K as RpcResponse, S as SDK_VERSION, O as ServerInfo, Q as SessionInfo, U as SubscribeParams, V as SubscribeResult, W as Subscription, X as Task, Y as TaskCancelParams, Z as TaskCancelResult, _ as TaskCreateParams, $ as TaskCreateResult, a0 as TaskGetParams, a1 as TaskGetResult, a2 as TaskListParams, a3 as TaskListResult, a4 as TaskStatus, a5 as TaskSubscribeParams, a6 as Timestamp, a7 as UnsubscribeParams, a8 as UnsubscribeResult, a9 as createMainBridge, aa as createPreloadAPI } from './electron-BPu69-ry.js';
+
+/**
+ * Agent — the reference worker runtime for a real node (PROTOCOL.md §5.3).
+ *
+ * One platform, one SDK: create an Agent in a Node/Deno/Bun/Electron process,
+ * register command handlers, call run(). The Agent registers itself with a
+ * platform descriptor, heartbeats, long-polls command.pull, executes handlers,
+ * reports command.complete and unregisters on shutdown.
+ *
+ * This module is browser-safe at import time: no Node built-ins are imported
+ * statically, and platform detection reads `globalThis` defensively.
+ */
+
+/** Executes one command method. Throwing marks the command failed. */
+type AgentHandler = (params: Record<string, unknown>, ctx: {
+    command: Command;
+    signal: AbortSignal;
+}) => unknown | Promise<unknown>;
+/** Handler error carrying a protocol error code/message. */
+declare class AgentHandlerError extends Error {
+    readonly code: number;
+    readonly data?: Record<string, unknown>;
+    constructor(code: number, message: string, data?: Record<string, unknown>);
+}
+interface AgentOptions extends HubClientOptions {
+    /** Reuse an existing client (it is not closed by the Agent). */
+    client?: HubClient;
+    /** Node id; the engine generates one when omitted. */
+    nodeId?: string;
+    name?: string;
+    capabilities?: string[];
+    tags?: string[];
+    metadata?: Record<string, unknown>;
+    /** Overrides auto-detection. */
+    platform?: NodePlatform;
+    /** Heartbeat interval; default 10000 ms (core watchdog is 15s). */
+    heartbeatMs?: number;
+    /** command.pull long-poll; default 5000 ms. */
+    pullWaitMs?: number;
+    /** Parallel pull loops; default 1. */
+    concurrency?: number;
+    /** Per-command handler timeout; 0 = none. */
+    handlerTimeoutMs?: number;
+    onError?: (err: unknown) => void;
+}
+/** Detects the platform of the current JavaScript runtime. */
+declare function detectPlatform(): NodePlatform;
+/** A registered node driven by the TypeScript SDK. */
+declare class Agent {
+    private readonly client;
+    private readonly ownClient;
+    private readonly nodeIdOpt?;
+    private readonly name?;
+    private readonly capabilities;
+    private readonly tags;
+    private readonly metadata?;
+    private readonly platform;
+    private readonly heartbeatMs;
+    private readonly pullWaitMs;
+    private readonly concurrency;
+    private readonly handlerTimeoutMs;
+    private readonly onError?;
+    private readonly handlers;
+    private node?;
+    private running;
+    private controller?;
+    private regPromise?;
+    constructor(options?: AgentOptions);
+    /** Registers a handler. Built-ins echo/platform.info can be overridden. */
+    handle(method: string, handler: AgentHandler): this;
+    get clientRef(): HubClient;
+    /** Current registered node id (undefined before registration). */
+    get nodeID(): string | undefined;
+    /** Snapshot of the registered node. */
+    get nodeInfo(): Node | undefined;
+    /** Stops a running agent (run() resolves after cleanup). */
+    stop(): void;
+    /**
+     * Registers and serves commands until the signal aborts (or stop() runs).
+     * Initial registration retries with exponential backoff.
+     */
+    run(signal?: AbortSignal): Promise<void>;
+    private report;
+    private registerParams;
+    private registerOnce;
+    private registerWithRetry;
+    /** Single-flight re-registration after node.not_found / node.offline. */
+    private ensureRegistered;
+    private heartbeatLoop;
+    private pullLoop;
+    private execute;
+    private complete;
+    private unregister;
+}
 
 /**
  * HubError — the single error type raised by the SDK.
@@ -47,6 +141,7 @@ declare const HUB_CODES: {
     readonly SEAT_NOT_FOUND: -32050;
     readonly SEAT_OCCUPIED: -32051;
     readonly SEAT_EXPECT_MISMATCH: -32052;
+    readonly SEAT_VACANT: -32053;
 };
 /**
  * SDK-local error codes (positive; never sent to the server, never collide
@@ -286,4 +381,4 @@ declare class PollTransport implements Transport {
 
 declare const EVENT_TYPES: readonly ["node.registered", "node.updated", "node.status.changed", "node.unregistered", "command.accepted", "command.started", "command.result", "command.failed", "command.cancelled", "task.created", "task.progress", "task.updated", "task.completed", "task.failed", "task.cancelled"];
 
-export { EVENT_TYPES, ErrorData, HUB_CODES, HttpTransport, HubError, HubEvent, ListenerSet, type PendingRequest, PollTransport, RPC_CODES, SDK_CODES, type Transport, TransportKind, type TransportOptions, WebSocketTransport, eventsUrl, isHubError, normalizeBaseUrl, pollUrl, toWsUrl };
+export { Agent, type AgentHandler, AgentHandlerError, type AgentOptions, Command, EVENT_TYPES, ErrorData, HUB_CODES, HttpTransport, HubClient, HubClientOptions, HubError, HubEvent, ListenerSet, Node, NodePlatform, type PendingRequest, PollTransport, RPC_CODES, SDK_CODES, type Transport, TransportKind, type TransportOptions, WebSocketTransport, detectPlatform, eventsUrl, isHubError, normalizeBaseUrl, pollUrl, toWsUrl };

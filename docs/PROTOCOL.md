@@ -127,7 +127,7 @@ JSON-RPC 2.0 数组批处理可用：`[{"jsonrpc":"2.0",...}, {...}]`。响应�
 
 ## 4. 数据模型
 
-> **标识符格式**：`c-`（指令）、`t-`（任务）、`s-`（席位）、`sub-`（订阅）前缀后的变量部分为**不可猜测的随机 token**（128-bit base64url，约 22 字符），**只有前缀是契约的一部分**——下文示例中的 `c-1` / `t-1` / `s-1` / `sub-1` 仅为示意，客户端不得假设其长度、格式或顺序。`ev-` 事件 id 为引擎内**递增序号**（事件 id 不对应任何可鉴权操作，事件流本就对所有订阅者全量广播，可预测无碍）。
+> **标识符格式**：`c-`（指令）、`t-`（任务）、`s-`（席位）、`sub-`（订阅）前缀后的变量部分为**不可猜测的随机 token**（128-bit base64url，约 22 字符），**只有前缀是契约的一部分**。下文示例中的 `c-1` / `t-1` / `s-1` / `sub-1` 仅为示意，客户端不得假设其长度、格式或顺序。`ev-` 事件 id 为引擎内**递增序号**（事件 id 不对应任何可鉴权操作，事件流本就对所有订阅者全量广播，可预测无碍）。
 
 ### 4.1 Node（被控节点）
 
@@ -138,6 +138,12 @@ JSON-RPC 2.0 数组批处理可用：`[{"jsonrpc":"2.0",...}, {...}]`。响应�
   "capabilities": ["shell.exec", "file.read"],
   "tags": ["linux", "x64"],
   "metadata": {"host": "h1", "arch": "amd64"},
+  "platform": {
+    "os": "linux", "arch": "amd64",
+    "runtime": "go", "runtime_version": "go1.21.5",
+    "agent_version": "1.1.0",
+    "labels": {"env": "prod", "zone": "a"}
+  },
   "last_seen": "2026-10-05T12:00:00.000Z",
   "registered_at": "2026-10-05T11:00:00.000Z"
 }
@@ -145,13 +151,20 @@ JSON-RPC 2.0 数组批处理可用：`[{"jsonrpc":"2.0",...}, {...}]`。响应�
 
 - `status` ∈ `online | busy | offline | unknown`。
 - `capabilities`、`tags`、`metadata` 均由注册方上报，引擎不解释（向前兼容：未知能力字符串原样保留）。
+- `platform`（可选，多平台集控）：注册方自报的平台描述。字段均可选、引擎不解释：
+  - `os` / `arch`：操作系统与架构（`linux` / `darwin` / `windows`，`amd64` / `arm64` / `x64` …）；
+  - `runtime`：接入运行时（`go` / `node` / `deno` / `bun` / `electron` / `browser` / `python` / `demo`，未知值原样保留）；
+  - `runtime_version` / `agent_version`：运行时版本与 SDK/Agent 版本；
+  - `labels`：字符串键值对，可用于平台分组或运维筛选。
+  官方 SDK 的 Agent 运行时自动探测该描述；`node.list` 支持按 `runtime` / `os` 精确过滤（§5）。
+  重新注册时提供 `platform` 会**整体替换**旧描述（未提供的字段不继承）；不提供则保留原值。
 - `seat_id`（可选，§4.7）：该节点占用的席位 id；未占席时省略或为 `null`。
 
 ### 4.2 Command（指令）
 
 ```json
 {
-  "id": "c-1", "node_id": "n-1", "method": "echo",
+  "id": "c-1", "node_id": "n-1", "seat_id": "s-1", "method": "echo",
   "params": {"text": "hi"},
   "status": "succeeded",
   "result": {"text": "hi"},
@@ -168,6 +181,8 @@ JSON-RPC 2.0 数组批处理可用：`[{"jsonrpc":"2.0",...}, {...}]`。响应�
 - `status` ∈ `pending | accepted | running | succeeded | failed | cancelled | timeout`。
 - `result` 与 `error` 互斥（`error` 为错误对象时 `result` 为 `null`）。
 - 未启动的字段省略或为 `null` 均可；**客户端必须容忍任意字段缺失**。
+- `seat_id`（可选）：指令经席位路由时记录所占席位；`node_id` 始终是最终执行节点。经席位下发的指令两个字段都会出现。
+- **两种执行模式**：内置 demo 节点由引擎进程内模拟器执行（`echo`/`fail`/`sleep`/`shell`）；真实节点通过 `command.pull` 领取、`command.complete` 回报（见 §5.3），指令在领取前为 `pending`。
 
 ### 4.3 Task（任务 = Command 集合）
 
@@ -229,7 +244,9 @@ JSON-RPC 2.0 数组批处理可用：`[{"jsonrpc":"2.0",...}, {...}]`。响应�
 {"id": "node.registry", "version": "1.0"}
 ```
 
-引擎内置能力：`node.registry`、`command.exec`、`task.flow`、`event.stream`、`auth.token`、`transport.ws`、`transport.http`、`encoding.json`、`seat.registry`。
+引擎内置能力：`node.registry`、`command.exec`、`task.flow`、`event.stream`、`auth.token`、`transport.ws`、`transport.http`、`encoding.json`、`seat.registry`、`seat.routing`、`command.dispatch`、`platform.registry`。
+
+能力是**只增不删**的：客户端必须忽略未知能力；`platform.registry` 表示节点可携带 `platform` 描述（§4.2）且 `node.list` 支持 `runtime` / `platform` / `os` 过滤，同时 `features.platforms = true`。旧引擎不宣告该能力，旧客户端不受影响。
 
 ### 4.7 Seat（席位）
 
@@ -265,6 +282,7 @@ JSON-RPC 2.0 数组批处理可用：`[{"jsonrpc":"2.0",...}, {...}]`。响应�
   - **退席（release）**：常席 → 虚席。触发：占用者注销/被判离线（看门狗）、或显式 `seat.unbind`。**壳位与画像保留**，可再次补席（"位置是持久的，占位者是流动的"）。
   - **消亡**：仅虚席可 `seat.delete`；常席须先退席。
 - 一个节点至多占用一个席位：节点补席时若已占用其他席位，旧席位自动退席（释放为虚席）。
+- **席位参与指令路由**：`command.send` / `command.batch` / `task.create` 的每个条目可用 `seat_id` 取代 `node_id`，引擎将其解析为当前占位节点（`node_id` 与 `seat_id` **互斥**，同时给出或同时缺省 → `-32602`）。空席没有执行者 → `-32053 seat.vacant`；席位不存在 → `-32050`。指令对象同时记录 `node_id`（实际执行者）与 `seat_id`（路由来源）。
 - `node.get` / `node.list` 返回的节点对象带可选字段 `seat_id`（占用席位 id）；旧客户端按"忽略未知字段"规则自然兼容。
 - 席位与现有 `node.registry` 正交：无席位时系统行为与现状完全一致；只有真实节点注册才触发**自动**补席（内置 demo 节点不参与自动补席，但可被 `seat.bind` 手动指派）。
 - 席位资源记录创建者所有者（规则同 §5 资源所有权）：非所有者调用 `seat.bind` / `seat.unbind` / `seat.delete` → `-32004`（`data.resource_type = "seat"`）。
@@ -283,14 +301,21 @@ JSON-RPC 2.0 数组批处理可用：`[{"jsonrpc":"2.0",...}, {...}]`。响应�
 | `auth.login` | 见 3.5 | `{"access_token", "token_type":"bearer", "expires_in", "refresh_token"?}` |
 | `auth.refresh` | `{refresh_token}` | 同上（**新 access_token 且新 refresh_token**；旧 token 对原子失效，旧 refresh_token 不可重放） |
 | `auth.logout` | `{}` | `{}`（吊销当前 token） |
-| `node.list` | `{filter?:{status?,tags?}, limit?, offset?}` | `{"nodes":[...], "total": N}`（limit 默认 100，最大 1000） |
+| `node.register` | `{node_id?, name?, capabilities?, tags?, metadata?, platform?}` | `{"node": {...}}`；注册或更新真实节点（同 id 重复注册 = 更新并恢复 online）；`node_id` 省略时引擎生成；demo id 冲突 → `-32602`；跨所有者接管 → `-32004` |
+| `node.list` | `{filter?:{status?,tags?,runtime?,platform?,os?}, limit?, offset?}` | `{"nodes":[...], "total": N}`（limit 默认 100，最大 1000；`runtime` 与 `platform` 等价，按 `platform.runtime` 精确匹配；`os` 按 `platform.os` 精确匹配） |
 | `node.get` | `{node_id}` | `{"node": {...}}`；不存在 → `-32010` |
+| `node.heartbeat` | `{node_id}` | `{"node": {...}}`；刷新 `last_seen`，离线节点恢复 online；不存在 → `-32010` |
+| `node.unregister` | `{node_id}` | `{"node": {...}}`；注销节点并终结其未完成指令 |
 | `node.subscribe` | `{node_id?}` | `{"subscription_id": "sub-..."}`（订阅该节点全部事件） |
 | `node.unsubscribe` | `{subscription_id}` | `{}` |
-| `command.send` | `{node_id, method, params?, timeout?, idempotency_key?}` | `{"command": {...}}`；节点离线 → `-32011` |
-| `command.batch` | `{commands:[{node_id,method,params?,timeout?}], idempotency_key?}` | `{"commands":[...], "task_id"?}`（同步逐个下发；失败者返回对应 error 于 command） |
+| `command.send` | `{node_id?, seat_id?, method, params?, timeout?, idempotency_key?}` | `{"command": {...}}`；节点离线 → `-32011`；`node_id`/`seat_id` 二选一 |
+| `command.batch` | `{commands:[{node_id?, seat_id?, method, params?, timeout?}], idempotency_key?}` | `{"commands":[...], "task_id"?}`（同步逐个下发；真实节点会等待其 pull/complete；失败者返回对应 error 于 command） |
 | `command.cancel` | `{command_id}` | `{"command": {...}}`；终态不可取消 → `-32014` |
-| `task.create` | `{name, commands:[{node_id,method,params?,timeout?}], parallel?}` | `{"task": {...}}`；立即开始执行 |
+| `command.get` | `{command_id}` | `{"command": {...}}`；不存在 → `-32013` |
+| `command.list` | `{filter?:{status?,node_id?,task_id?}, limit?, offset?}` | `{"commands":[...], "total": N}`（最新的在前） |
+| `command.pull` | `{node_id, limit?, wait?}` | `{"commands":[...]}`；真实节点领取待执行指令，`wait` 为长轮询毫秒（≤30000） |
+| `command.complete` | `{node_id, command_id, status, result?, error?}` | `{"command": {...}}`；幂等：已终态原样返回 |
+| `task.create` | `{name, commands:[{node_id?, seat_id?, method, params?, timeout?}], parallel?}` | `{"task": {...}}`；立即开始执行 |
 | `task.get` | `{task_id}` | `{"task": {...}}`；不存在 → `-32020` |
 | `task.list` | `{filter?:{status?}, limit?, offset?}` | `{"tasks":[...], "total": N}` |
 | `task.cancel` | `{task_id}` | `{"task": {...}}`；终态 → `-32021` |
@@ -308,7 +333,46 @@ JSON-RPC 2.0 数组批处理可用：`[{"jsonrpc":"2.0",...}, {...}]`。响应�
 >
 > **超时/时长参数**：`command.send` / `command.batch` / `task.create` 的 `timeout` 与 `sleep` 的 `ms` 必须为**整数毫秒**，范围 `[0, 2147483647]`；`0` = 不超时（`sleep` 的 `ms=0` 为立即返回）；非整数（如 `0.5`）→ `-32602`；负值按 `0` 处理。
 >
-> **资源所有权**：订阅、指令、任务资源记录创建者所有者（token 模式为签发的 access_token，basic 模式为 `basic:<user>`）。非所有者调用 `event.unsubscribe` / `node.unsubscribe` / `command.cancel` / `task.cancel` → `-32004`（见 §7.2），且该检查先于存在性/终态检查（跨所有者探测无法区分资源是否存在）；匿名（none 模式、无 token）创建的资源不校验所有权。
+> **资源所有权**：订阅、指令、任务资源记录创建者所有者（token 模式为签发的 access_token，basic 模式为 `basic:<user>`）。非所有者调用 `event.unsubscribe` / `node.unsubscribe` / `command.cancel` / `task.cancel` → `-32004`（见 §7.2），且该检查先于存在性/终态检查（跨所有者探测无法区分资源是否存在）；匿名（none 模式、无 token）创建的资源不校验所有权。none 模式下 `auth.login {}` 签发的**匿名 token 只是会话标识，不构成所有者**。节点可被任意新会话重新注册（否则重启后的 Agent 无法认领自己的节点）。
+
+### 5.3 真实节点下发（`command.pull` / `command.complete`）
+
+内置 demo 节点在引擎进程内执行；**真实节点**（`node.register` 或 `POST /v1/register` 注册）通过拉取模式执行指令，因此任意语言、任意传输都能做 worker，引擎不需要向节点建立回调连接。两种注册入口语义一致：请求体/参数相同（`node_id` 在 HTTP 入口叫 `id`）、同 id 重复注册为更新、注册者成为所有者。
+
+**状态机**（仅真实节点）：
+
+```
+pending --command.pull--> running --command.complete--> succeeded | failed | cancelled | timeout
+   |                          |
+   +-- timeout/cancel/node offline ---> 终态
+```
+
+- `command.send` 发往真实节点时立即返回 `status=pending` 的指令；节点用 `command.pull` 领取（可长轮询 `wait` 毫秒），领取瞬间转为 `running` 并发布 `command.started`。
+- 节点用 `command.complete` 回报 `succeeded | failed | cancelled | timeout`，可附 `result` 或 `{code,message,data}` 错误对象。**幂等**：对已终态指令再次 complete 原样返回，不改变首次终态。
+- `timeout`（默认 30000ms）是**从下发到终态的引擎侧上限**，包含排队等待；`0` 表示不设上限。超时由引擎终结为 `timeout`。
+- `command.cancel` 对尚未领取的指令直接出队；已领取的指令标记 `cancelled`，节点随后回报的结果被忽略（首次终态优先）。
+- 节点注销、被看门狗判离线时，其队列中（含已领取未回报）的指令统一终结为 `failed` + `-32011 node.offline`。
+- **至多一次**：引擎从不在重启后重放指令；重启时未完成的指令标记为 `failed`（`data.reason = "engine.restarted"`）。
+- 节点身份：`node.register` / `POST /v1/register` 记录注册者所有者；`command.pull` / `command.complete` / `node.heartbeat` / `node.unregister` 要求调用者与节点所有者一致（匿名注册的节点保持开放，与 none 模式一致），防止冒领其他节点的指令。
+- `command.batch` 对真实节点保持**同步**语义：服务端等待节点领取并回报，直到终态或超时。
+- `task.create` 的指令同样进入队列，任务进度在 `command.complete` 后推进；任务取消会出队/终结对应指令。
+
+### 5.4 平台 Agent 生命周期（SDK 参考实现）
+
+多平台集控的最小接入单元是"Agent"：一个在目标平台上运行、由 SDK 提供运行时、承载业务 handler 的进程/线程。官方三套 SDK（Go / TypeScript / Python）内置 Agent，其他语言可按本节自行实现：
+
+```
+node.register  →  node.heartbeat（周期）  →  command.pull（长轮询）
+               →  本地执行 handler        →  command.complete
+               →  node.unregister（退出）
+```
+
+- **注册**：上报 `node_id`（可省略）、`name`、`capabilities`、`tags`、`metadata` 和 `platform`。Agent 应把自身支持的方法列入 `capabilities`，便于控制台/调用方选型。
+- **心跳**：默认 10s；引擎在 3 个心跳周期（15s）未收到心跳后判定 offline。心跳/拉取返回 `-32010 node.not_found` 或 `-32011 node.offline` 时，Agent 应重新注册。
+- **执行**：未注册的指令方法回报 `failed` + `-32601`；handler 抛错回报 `failed`，错误对象为 `{code, message}`（默认 `-32603`）。
+- **幂等/退出**：`command.complete` 幂等；正常退出前调用 `node.unregister`，引擎会终结该节点未完成指令（`-32011`）。异常退出则由看门狗回收。
+- **并发**：Agent 可运行多个拉取循环，每个循环一次只领取一条（`limit=1`），避免一次领取超过本地执行能力。
+- **传输**：WebSocket 单连接支持并发请求（长轮询不阻塞心跳/回执）；HTTP 长轮询天然独立。SDK 默认 `auto` 协商。
 
 ---
 
@@ -321,7 +385,8 @@ JSON-RPC 2.0 数组批处理可用：`[{"jsonrpc":"2.0",...}, {...}]`。响应�
 | SSE | `http[s]://host/v1/events?token=...` | `text/event-stream`；`data:` 为 JSON-RPC notification（`event` 方法） |
 | 长轮询 | `http[s]://host/v1/poll?cursor=N&timeout=30&token=...` | 返回 `{"cursor": N, "events":[...]}`（事件对象数组）或空列表；`timeout` 最大 60s |
 | 健康检查 | `GET /v1/health` | `{"ok": true, "version": "1.0.0", "time": ISO}` |
-| 节点注册 | `POST /v1/register` | 真实节点注册（body：`{id?, name?, capabilities?, tags?, metadata?}`）；同 id 重复注册为**更新**；请求 id 与内置 **demo 节点冲突 → `-32602`**（HTTP 400 + JSON-RPC 错误信封，不允许遮蔽 demo 节点） |
+| 节点注册 | `POST /v1/register` | 真实节点注册（body：`{id?, name?, capabilities?, tags?, metadata?, platform?}`）；等价于 JSON-RPC `node.register`（`id` ↔ `node_id`）；同 id 重复注册为**更新**；请求 id 与内置 **demo 节点冲突 → `-32602`**（HTTP 400 + JSON-RPC 错误信封，不允许遮蔽 demo 节点）；注册者成为节点的所有者 |
+| Web 控制台 | `GET /console/` | 引擎内嵌的零构建管理控制台（静态资源，同源调用 RPC 与事件流；API 本身仍按 §3 鉴权） |
 
 ### 6.1 传输降级顺序（SDK 内置）
 
@@ -358,7 +423,7 @@ JSON-RPC 2.0 数组批处理可用：`[{"jsonrpc":"2.0",...}, {...}]`。响应�
 | `-32001` | auth.required 未认证 | `{}` |
 | `-32002` | auth.invalid 凭证无效 | `{}` |
 | `-32003` | auth.expired token 过期 | `{"retry_after": 0}` |
-| `-32004` | auth.forbidden 无权限 | `{"resource_type": "subscription" \| "command" \| "task"}` |
+| `-32004` | auth.forbidden 无权限 | `{"resource_type": "subscription" \| "command" \| "task" \| "seat" \| "node"}` |
 | `-32005` | protocol.version.mismatch | `{"supported": ["1.0"], "client": ["0.9"]}` |
 | `-32006` | encoding.not.supported | `{"supported": ["json"]}` |
 | `-32007` | transport.not.supported | `{}` |
@@ -376,6 +441,7 @@ JSON-RPC 2.0 数组批处理可用：`[{"jsonrpc":"2.0",...}, {...}]`。响应�
 | `-32050` | seat.not_found | `{"seat_id": "..."}` |
 | `-32051` | seat.occupied | `{"seat_id": "..."}` |
 | `-32052` | seat.expect.mismatch | `{"seat_id": "...", "node_id": "..."}` |
+| `-32053` | seat.vacant 席位无占位者 | `{"seat_id": "..."}` |
 
 > `-32004 auth.forbidden` 的触发场景：**非资源所有者**调用 `event.unsubscribe` / `node.unsubscribe` / `command.cancel` / `task.cancel`，`data.resource_type` 标明资源种类。所有者身份 = 签发该 access_token 的会话（token 模式）或 basic 用户（`basic:<user>`）；匿名（none 模式、无 token）创建的资源不校验。同一 access_token 的多次调用视为同一所有者。
 
@@ -389,3 +455,33 @@ JSON-RPC 2.0 数组批处理可用：`[{"jsonrpc":"2.0",...}, {...}]`。响应�
 4. 废弃字段：schema 标记 `"deprecated": true` 并注明 `deprecatedMessage`，至少保留 2 个大版本。
 5. `engine.info`/`engine.capabilities` 永不鉴权要求失败（匿名可查），用于发现。
 6. 心跳失败、超时、断线一律不抛出业务异常，走重连/降级路径。
+
+---
+
+## 9. 持久化与会话恢复（可选，`-data-dir`）
+
+默认纯内存。指定 `-data-dir` 后，引擎把需要跨重启的实体快照到 `<dir>/hub-state.json`（单文件、原子写入、0600 权限，1 秒防抖 + 退出时 flush）。
+
+**持久化内容**：真实节点注册表、席位（含期望画像）、任务、指令历史（最近 2000 条）、未过期的 access/refresh token。
+
+**恢复语义（明确且不重放）**：
+
+| 实体 | 恢复后 |
+|---|---|
+| 真实节点 | 状态 `offline`，等待重新注册/心跳；`seat_id` 清空；`platform`/`capabilities`/`tags`/`metadata` 原样保留 |
+| 常席 | 退为虚席（壳位与 `expect` 保留），符合"位置持久、占位者流动" |
+| 未完成指令/任务 | 标记 `failed`，error `data.reason = "engine.restarted"`；**绝不重放** |
+| 已终态指令/任务 | 原样恢复（含结果/错误） |
+| token | 在 TTL 内继续有效，所有者校验保持可用 |
+
+事件游标与事件历史仍只在内存中（见 §6.2）。持久化文件包含 token，应视同凭证保护。
+
+---
+
+## 10. 安全默认值（shell 执行器）
+
+- `shell` 仅在内置 demo 执行器上可用，且必须**同时**满足：`-allow-shell` 开启 + `-shell-allow <bin>[,...]` 非空白名单。
+- 只接受 **argv 数组**（`{"cmd":["echo","hi"]}`）；字符串形式（会交给 `sh -c`）一律拒绝，因为白名单无法安全审计脚本内容。
+- `argv[0]` 的 basename 必须命中白名单；未命中 → `-32040 feature.disabled`（`data.reason = "command_not_allowed"`）。
+- 每次获准执行都会写入审计日志（节点、argv、所有者）；未启用时 demo 节点也不广告 `shell.exec` 能力。
+- 真实节点的执行器由节点自己负责，引擎只下发方法与 params（见 §5.3）。

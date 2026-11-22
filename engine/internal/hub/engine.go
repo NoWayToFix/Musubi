@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -43,10 +44,20 @@ type Config struct {
 	// commands. Default false: the -demo executor is a simulator and must
 	// not reach the host OS unless an operator opts in explicitly.
 	AllowShell bool
+	// ShellAllowlist is the set of executable basenames the shell executor may
+	// run. It is required in addition to AllowShell: enabling shell without a
+	// non-empty allowlist keeps the feature disabled. Only argv-form commands
+	// are accepted (no "sh -c" strings), so the first argv element is the
+	// binary being checked.
+	ShellAllowlist []string
 	// AllowedOrigins lists extra browser origins permitted on the
 	// state-changing endpoints (/v1/rpc, /v1/ws, /v1/register). Absent-Origin
 	// (non-browser) and same-origin clients are always allowed.
 	AllowedOrigins []string
+	// DataDir enables durable state: seats, real nodes, terminal commands,
+	// tasks and unexpired tokens are snapshotted to <DataDir>/hub-state.json
+	// (atomic writes, 1s debounce). Empty = pure in-memory (the default).
+	DataDir string
 }
 
 // CallCtx carries per-call state into method handlers: the resolved auth
@@ -63,14 +74,19 @@ type Hub struct {
 	log    *slog.Logger
 	router *jsonrpc.Router
 
-	auth   *authManager
-	nodes  *nodeRegistry
-	cmds   *commandRegistry
-	tasks  *taskRegistry
-	seats  *seatRegistry
-	events *eventBus
+	auth     *authManager
+	nodes    *nodeRegistry
+	cmds     *commandRegistry
+	tasks    *taskRegistry
+	seats    *seatRegistry
+	events   *eventBus
+	dispatch *dispatcher
 
 	nodeSeq atomic.Int64
+
+	store     *fileStore
+	dirty     atomic.Bool
+	persistMu sync.Mutex
 
 	startOnce sync.Once
 	stopCh    chan struct{}
@@ -97,9 +113,63 @@ func NewHub(cfg Config) *Hub {
 	h.cmds = newCommandRegistry(h)
 	h.tasks = newTaskRegistry(h)
 	h.seats = newSeatRegistry(h)
+	h.dispatch = newDispatcher(h)
 	h.registerMethods()
 	h.registerDemoNodes()
+	h.events.markDirty = h.markDirty
+	if cfg.DataDir != "" {
+		store, err := newFileStore(cfg.DataDir)
+		if err != nil {
+			h.log.Error("durable state disabled: cannot open data dir", "dir", cfg.DataDir, "error", err)
+		} else {
+			h.store = store
+			state, err := store.load()
+			switch {
+			case err != nil:
+				h.log.Error("durable state ignored: snapshot unreadable", "dir", cfg.DataDir, "error", err)
+			case state != nil:
+				h.restoreState(state)
+				h.log.Info("durable state restored", "dir", cfg.DataDir, "saved_at", state.SavedAt,
+					"nodes", len(state.Nodes), "seats", len(state.Seats), "tasks", len(state.Tasks))
+			}
+		}
+	}
 	return h
+}
+
+// markDirty schedules a snapshot on the next persist tick. All state-changing
+// operations publish at least one event, so the event bus calls this; auth
+// changes call it directly.
+func (h *Hub) markDirty() {
+	if h.store != nil {
+		h.dirty.Store(true)
+	}
+}
+
+// flushState writes one snapshot when there is pending state. A failed write
+// keeps the dirty flag set so the next tick retries.
+func (h *Hub) flushState() {
+	if h.store == nil {
+		return
+	}
+	h.persistMu.Lock()
+	defer h.persistMu.Unlock()
+	if !h.dirty.CompareAndSwap(true, false) {
+		return
+	}
+	if err := h.store.save(h.snapshotState()); err != nil {
+		h.log.Error("durable state write failed", "error", err)
+		h.dirty.Store(true)
+	}
+}
+
+// Stop flushes pending durable state. Safe to call more than once and on a
+// memory-only hub.
+func (h *Hub) Stop() {
+	if h.store != nil {
+		h.dirty.Store(true)
+		h.flushState()
+	}
 }
 
 // reg registers one JSON-RPC method. Handlers receive a decoded params object
@@ -123,6 +193,7 @@ func (h *Hub) registerMethods() {
 	h.reg("auth.refresh", true, h.authRefresh)
 	h.reg("auth.logout", false, h.authLogout)
 	// nodes.
+	h.reg("node.register", false, h.nodeRegister)
 	h.reg("node.list", false, h.nodeList)
 	h.reg("node.get", false, h.nodeGet)
 	h.reg("node.heartbeat", false, h.nodeHeartbeat)
@@ -133,6 +204,11 @@ func (h *Hub) registerMethods() {
 	h.reg("command.send", false, h.cmdSend)
 	h.reg("command.batch", false, h.cmdBatch)
 	h.reg("command.cancel", false, h.cmdCancel)
+	h.reg("command.get", false, h.cmdGet)
+	h.reg("command.list", false, h.cmdList)
+	// remote node dispatch (additive, PROTOCOL.md §5.3).
+	h.reg("command.pull", false, h.cmdPull)
+	h.reg("command.complete", false, h.cmdComplete)
 	// tasks.
 	h.reg("task.create", false, h.taskCreate)
 	h.reg("task.get", false, h.taskGet)
@@ -153,16 +229,25 @@ func (h *Hub) registerMethods() {
 
 // registerDemoNodes creates the always-online simulated nodes n-1..n-N.
 func (h *Hub) registerDemoNodes() {
+	shellEnabled := h.cfg.AllowShell && len(h.cfg.ShellAllowlist) > 0
 	for i := 1; i <= h.cfg.DemoNodes; i++ {
 		id := fmt.Sprintf("n-%d", i)
 		meta := map[string]any{"kind": "demo", "host": fmt.Sprintf("demo-%d", i)}
+		caps := []string{"file.read"}
+		if shellEnabled {
+			caps = append(caps, "shell.exec")
+		}
 		h.nodes.register(RegisterRequest{
 			ID:           id,
 			Name:         fmt.Sprintf("worker-%d", i),
-			Capabilities: &[]string{"shell.exec", "file.read"},
+			Capabilities: &caps,
 			Tags:         []string{"linux", "x64", "demo"},
 			Metadata:     meta,
-		}, true)
+			Platform: &NodePlatform{
+				OS: runtime.GOOS, Arch: runtime.GOARCH, Runtime: "demo",
+				RuntimeVersion: runtime.Version(), AgentVersion: Version,
+			},
+		}, true, "")
 	}
 }
 
@@ -171,7 +256,26 @@ func (h *Hub) registerDemoNodes() {
 func (h *Hub) Start(ctx context.Context) {
 	h.startOnce.Do(func() {
 		go h.watchdogLoop(ctx)
+		if h.store != nil {
+			go h.persistLoop(ctx)
+		}
 	})
+}
+
+// persistLoop debounces durable writes: dirty state is flushed at most once
+// per second, and one last time when the context is cancelled.
+func (h *Hub) persistLoop(ctx context.Context) {
+	t := time.NewTicker(persistInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			h.flushState()
+			return
+		case <-t.C:
+			h.flushState()
+		}
+	}
 }
 
 func (h *Hub) watchdogLoop(ctx context.Context) {
@@ -187,6 +291,8 @@ func (h *Hub) watchdogLoop(ctx context.Context) {
 				// The occupant left: the seat shell returns to vacant
 				// (PROTOCOL.md §4.7 退席), keeping its expect profile.
 				h.seats.releaseByNode(id)
+				// Queued/running work cannot complete on a silent node.
+				h.failNodeCommands(id, jsonrpc.CodeNodeOffline, "node.offline")
 			}
 			h.cmds.cleanupIdem()
 		}
@@ -455,10 +561,25 @@ func (h *Hub) newSubID() string {
 // (none mode without a token). Resources with an empty owner are
 // unrestricted — none mode is the documented trust-everything mode.
 func callerOwner(cc *CallCtx) string {
-	if cc == nil || cc.Session == nil || cc.Session.Token == nil {
+	if cc == nil {
 		return ""
 	}
-	t := cc.Session.Token
+	return OwnerOfSession(cc.Session)
+}
+
+// OwnerOfSession is the exported form of the owner identity, used by the HTTP
+// layer when a real node registers (the registrar owns the node id).
+func OwnerOfSession(sess *Session) string {
+	if sess == nil || sess.Token == nil {
+		return ""
+	}
+	t := sess.Token
+	// Anonymous tokens (auth.login {} in none mode) are session-tracking
+	// identifiers, not identities: they must not pin ownership, otherwise a
+	// restarted agent could never reclaim its node id.
+	if t.Anonymous {
+		return ""
+	}
 	if t.AccessToken != "" {
 		return t.AccessToken
 	}

@@ -429,8 +429,39 @@ class HubClient(object):
     # node.* / command.* / task.*
     # ------------------------------------------------------------------
 
+    def node_register(self, node_id=None, name=None, capabilities=None,
+                      tags=None, metadata=None, platform=None):
+        """node.register: join the control center as a real node.
+
+        Re-registering the same node_id updates the node and brings it back
+        online. platform is the self-reported descriptor dict, e.g.
+        {"os": "linux", "arch": "x86_64", "runtime": "python"}.
+        """
+        p = {}
+        if node_id:
+            p["node_id"] = node_id
+        if name:
+            p["name"] = name
+        if capabilities:
+            p["capabilities"] = list(capabilities)
+        if tags:
+            p["tags"] = list(tags)
+        if metadata is not None:
+            p["metadata"] = metadata
+        if platform is not None:
+            p["platform"] = platform
+        return self.call("node.register", p)
+
+    def node_heartbeat(self, node_id):
+        """node.heartbeat: refresh last_seen so the node stays online."""
+        return self.call("node.heartbeat", {"node_id": node_id})
+
+    def node_unregister(self, node_id):
+        """node.unregister: leave the control center (fails in-flight work)."""
+        return self.call("node.unregister", {"node_id": node_id})
+
     def node_list(self, node_filter=None, limit=None, offset=None):
-        """node.list; node_filter: {status?, tags?}."""
+        """node.list; node_filter: {status?, tags?, runtime?, os?}."""
         params = {}
         if node_filter:
             params["filter"] = node_filter
@@ -444,10 +475,14 @@ class HubClient(object):
         """node.get; raises HubError(-32010) if not found."""
         return self.call("node.get", {"node_id": node_id})
 
-    def command_send(self, node_id, method, params=None, timeout=None,
-                     idempotency_key=None):
-        """command.send; raises HubError(-32011) if the node is offline."""
-        p = {"node_id": node_id, "method": method}
+    def command_send(self, node_id=None, method=None, params=None, timeout=None,
+                     idempotency_key=None, seat_id=None):
+        """command.send; address a node_id or a seat_id (mutually exclusive)."""
+        p = {"method": method}
+        if node_id:
+            p["node_id"] = node_id
+        if seat_id:
+            p["seat_id"] = seat_id
         if params:
             p["params"] = params
         if timeout is not None:
@@ -457,7 +492,7 @@ class HubClient(object):
         return self.call("command.send", p)
 
     def command_batch(self, commands, idempotency_key=None):
-        """command.batch; commands: list of {node_id, method, params?, timeout?}."""
+        """command.batch; commands: list of {node_id|seat_id, method, params?, timeout?}."""
         p = {"commands": commands}
         if idempotency_key:
             p["idempotency_key"] = idempotency_key
@@ -466,6 +501,40 @@ class HubClient(object):
     def command_cancel(self, command_id):
         """command.cancel; raises HubError(-32014) if already terminal."""
         return self.call("command.cancel", {"command_id": command_id})
+
+    def command_get(self, command_id):
+        """command.get; raises HubError(-32013) if not found."""
+        return self.call("command.get", {"command_id": command_id})
+
+    def command_list(self, command_filter=None, limit=None, offset=None):
+        """command.list; command_filter: {status?, node_id?, task_id?}."""
+        p = {}
+        if command_filter:
+            p["filter"] = command_filter
+        if limit is not None:
+            p["limit"] = limit
+        if offset is not None:
+            p["offset"] = offset
+        return self.call("command.list", p)
+
+    def command_pull(self, node_id, limit=None, wait=None):
+        """command.pull: claim queued commands as a real node (wait = ms)."""
+        p = {"node_id": node_id}
+        if limit is not None:
+            p["limit"] = limit
+        if wait is not None:
+            p["wait"] = wait
+        return self.call("command.pull", p)
+
+    def command_complete(self, node_id, command_id, status, result=None,
+                         error=None):
+        """command.complete: report a pulled command's terminal state."""
+        p = {"node_id": node_id, "command_id": command_id, "status": status}
+        if result is not None:
+            p["result"] = result
+        if error is not None:
+            p["error"] = error
+        return self.call("command.complete", p)
 
     def task_create(self, name, commands, parallel=False):
         """task.create; starts immediately."""

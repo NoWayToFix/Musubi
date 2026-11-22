@@ -36,8 +36,12 @@ func main() {
 		verbose    = flag.Bool("verbose", false, "enable debug logging")
 		allowShell = flag.Bool("allow-shell", false,
 			"allow the built-in demo executor to run host shell commands (off by default)")
+		shellAllow = flag.String("shell-allow", "",
+			"comma-separated executable basenames the shell executor may run (required with -allow-shell)")
 		allowOrigin = flag.String("allow-origin", "",
 			"comma-separated extra browser origins allowed on /v1/rpc, /v1/ws and /v1/register")
+		dataDir = flag.String("data-dir", "",
+			"directory for durable state (empty = pure in-memory)")
 	)
 	flag.Parse()
 
@@ -61,6 +65,7 @@ func main() {
 		os.Exit(2)
 	}
 
+	shellAllowlist := splitCSV(*shellAllow)
 	h := hub.NewHub(hub.Config{
 		AuthMode:       *authMode,
 		Token:          *token,
@@ -68,11 +73,19 @@ func main() {
 		Pass:           *pass,
 		DemoNodes:      *demo,
 		AllowShell:     *allowShell,
+		ShellAllowlist: shellAllowlist,
 		AllowedOrigins: splitOrigins(*allowOrigin),
+		DataDir:        *dataDir,
 		Logger:         logger,
 	})
+	defer h.Stop()
 	if *allowShell {
-		logger.Warn("built-in demo shell executor ENABLED: command.send method=shell runs host commands as this process user")
+		if len(shellAllowlist) == 0 {
+			logger.Warn("built-in shell executor requested but no -shell-allow list: all shell commands stay disabled")
+		} else {
+			logger.Warn("built-in demo shell executor ENABLED: argv commands whose executable is allow-listed run as this process user",
+				"allow", shellAllowlist)
+		}
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -112,7 +125,11 @@ func main() {
 }
 
 // splitOrigins parses a comma-separated origin list, dropping blanks.
-func splitOrigins(s string) []string {
+func splitOrigins(s string) []string { return splitCSV(s) }
+
+// splitCSV parses a comma-separated list, trimming whitespace and dropping
+// empty entries.
+func splitCSV(s string) []string {
 	if strings.TrimSpace(s) == "" {
 		return nil
 	}

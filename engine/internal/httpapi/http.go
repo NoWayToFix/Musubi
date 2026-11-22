@@ -12,8 +12,10 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"musubi/engine/internal/console"
 	"musubi/engine/internal/hub"
 	"musubi/engine/internal/jsonrpc"
 	"musubi/engine/internal/ws"
@@ -42,6 +44,18 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("/v1/health", a.handleHealth)
 	mux.HandleFunc("/v1/register", a.handleRegister)
 	mux.HandleFunc("/v1/ws", a.handleWS)
+	// Embedded web console (static assets; the API itself still authenticates).
+	mux.Handle("/console/", console.Handler())
+	mux.HandleFunc("/console", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/console/", http.StatusMovedPermanently)
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" {
+			http.Redirect(w, r, "/console/", http.StatusFound)
+			return
+		}
+		http.NotFound(w, r)
+	})
 	return mux
 }
 
@@ -188,7 +202,8 @@ func (a *API) handleRegister(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "origin not allowed", http.StatusForbidden)
 		return
 	}
-	if _, aerr := a.hub.ResolveHeaderAuth(r.Header.Get("Authorization")); aerr != nil {
+	sess, aerr := a.hub.ResolveHeaderAuth(r.Header.Get("Authorization"))
+	if aerr != nil {
 		writeJSON(w, http.StatusUnauthorized, jsonrpc.ErrorResponse(nil, aerr))
 		return
 	}
@@ -197,7 +212,7 @@ func (a *API) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, jsonrpc.ErrorResponse(nil, jsonrpc.ErrParse()))
 		return
 	}
-	n, nerr := a.hub.RegisterNode(reg)
+	n, nerr := a.hub.RegisterNodeOwned(reg, hub.OwnerOfSession(sess))
 	if nerr != nil {
 		writeJSON(w, http.StatusBadRequest, jsonrpc.ErrorResponse(nil, nerr))
 		return
@@ -226,10 +241,35 @@ func (a *API) handleWS(w http.ResponseWriter, r *http.Request) {
 	authHeader := r.Header.Get("Authorization")
 	// Subscriptions created on this connection are closed on EVERY exit path,
 	// including write failures, binary frames and the close handshake, which
-	// bypassed the old post-loop cleanup and leaked subscriptions.
-	var subs []string
+	// bypassed the old post-loop cleanup and leaked subscriptions. The mutex
+	// also covers handlers that create a subscription after the socket closed.
+	var (
+		subsMu sync.Mutex
+		subs   []string
+		closed bool
+	)
+	trackSub := func(id string) {
+		subsMu.Lock()
+		if closed {
+			subsMu.Unlock()
+			a.hub.CloseEventSubByID(id)
+			return
+		}
+		subs = append(subs, id)
+		subsMu.Unlock()
+		// Forward the subscription's events to this socket as notifications
+		// until either side closes (PROTOCOL §5.2).
+		if sub := a.hub.GetEventSubByID(id); sub != nil {
+			go pumpWSSub(conn, sub)
+		}
+	}
 	defer func() {
-		for _, id := range subs {
+		subsMu.Lock()
+		closed = true
+		list := subs
+		subs = nil
+		subsMu.Unlock()
+		for _, id := range list {
 			a.hub.CloseEventSubByID(id)
 		}
 	}()
@@ -242,22 +282,19 @@ func (a *API) handleWS(w http.ResponseWriter, r *http.Request) {
 		}
 		switch op {
 		case ws.OpText:
-			cc := &hub.CallCtx{
-				TrackSub: func(id string) {
-					subs = append(subs, id)
-					// Forward the subscription's events to this socket as
-					// notifications until either side closes (PROTOCOL §5.2).
-					if sub := a.hub.GetEventSubByID(id); sub != nil {
-						go pumpWSSub(conn, sub)
-					}
-				},
-			}
-			out := a.hub.HandleRawCtx(payload, authHeader, cc)
-			if len(out) > 0 {
-				if err := conn.WriteMessage(ws.OpText, out); err != nil {
+			cc := &hub.CallCtx{TrackSub: trackSub}
+			// Handle each request concurrently: command.pull is a long-poll
+			// and must not block heartbeats, completions or other calls on the
+			// same socket. WriteMessage serializes responses internally.
+			go func(payload []byte) {
+				out := a.hub.HandleRawCtx(payload, authHeader, cc)
+				if len(out) == 0 {
 					return
 				}
-			}
+				if err := conn.WriteMessage(ws.OpText, out); err != nil {
+					_ = conn.Close()
+				}
+			}(payload)
 		case ws.OpBinary:
 			_ = conn.WriteClose(1003, "binary frames not supported")
 			return

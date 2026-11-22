@@ -7,6 +7,17 @@ package sdk
 // responses from newer hub versions carrying new fields never break this SDK.
 // Pointer fields distinguish "absent" from "null" where the protocol allows null.
 
+// NodePlatform is the self-reported platform descriptor of a node
+// (PROTOCOL.md §4.1). All fields optional; the core treats them as opaque.
+type NodePlatform struct {
+	OS             string            `json:"os,omitempty"`
+	Arch           string            `json:"arch,omitempty"`
+	Runtime        string            `json:"runtime,omitempty"`
+	RuntimeVersion string            `json:"runtime_version,omitempty"`
+	AgentVersion   string            `json:"agent_version,omitempty"`
+	Labels         map[string]string `json:"labels,omitempty"`
+}
+
 // Node is a registered controlled node (PROTOCOL.md §4.1).
 type Node struct {
 	ID           string         `json:"id,omitempty"`
@@ -15,9 +26,22 @@ type Node struct {
 	Capabilities []string       `json:"capabilities,omitempty"`
 	Tags         []string       `json:"tags,omitempty"`
 	Metadata     map[string]any `json:"metadata,omitempty"`
+	Platform     *NodePlatform  `json:"platform,omitempty"`
 	LastSeen     string         `json:"last_seen,omitempty"`
 	RegisteredAt string         `json:"registered_at,omitempty"`
 	SeatID       *string        `json:"seat_id,omitempty"` // occupied seat (PROTOCOL.md §4.7)
+}
+
+// NodeRegisterParams is the node.register parameter (PROTOCOL.md §5).
+// NodeID is optional; the engine generates one when empty. Re-registering the
+// same id updates the node and brings it back online.
+type NodeRegisterParams struct {
+	NodeID       string         `json:"node_id,omitempty"`
+	Name         string         `json:"name,omitempty"`
+	Capabilities []string       `json:"capabilities,omitempty"`
+	Tags         []string       `json:"tags,omitempty"`
+	Metadata     map[string]any `json:"metadata,omitempty"`
+	Platform     *NodePlatform  `json:"platform,omitempty"`
 }
 
 // SeatExpect is the expected profile a filling node must match
@@ -62,6 +86,7 @@ type CommandError struct {
 type Command struct {
 	ID             string         `json:"id,omitempty"`
 	NodeID         string         `json:"node_id,omitempty"`
+	SeatID         string         `json:"seat_id,omitempty"` // routing seat, when sent by seat_id
 	Method         string         `json:"method,omitempty"`
 	Params         map[string]any `json:"params,omitempty"`
 	Status         string         `json:"status,omitempty"` // pending|accepted|running|succeeded|failed|cancelled|timeout
@@ -153,10 +178,33 @@ type AuthResult struct {
 // CommandSpec is the command.send / command.batch entry (PROTOCOL.md §5).
 type CommandSpec struct {
 	NodeID         string         `json:"node_id,omitempty"`
+	SeatID         string         `json:"seat_id,omitempty"` // address a seat instead of a node
 	Method         string         `json:"method,omitempty"`
 	Params         map[string]any `json:"params,omitempty"`
 	Timeout        int64          `json:"timeout,omitempty"`
 	IdempotencyKey string         `json:"idempotency_key,omitempty"`
+}
+
+// CommandPullParams is the command.pull parameter for real-node workers.
+type CommandPullParams struct {
+	NodeID string `json:"node_id"`
+	Limit  int    `json:"limit,omitempty"`
+	WaitMS int64  `json:"wait,omitempty"` // long-poll milliseconds
+}
+
+// CommandCompleteParams reports a pulled command's terminal state.
+type CommandCompleteParams struct {
+	NodeID    string        `json:"node_id"`
+	CommandID string        `json:"command_id"`
+	Status    string        `json:"status"` // succeeded|failed|cancelled|timeout
+	Result    any           `json:"result,omitempty"`
+	Error     *CommandError `json:"error,omitempty"`
+}
+
+// CommandListResult is the command.list result.
+type CommandListResult struct {
+	Commands []Command `json:"commands,omitempty"`
+	Total    int       `json:"total,omitempty"`
 }
 
 // TaskSpec is the task.create parameter (PROTOCOL.md §5).

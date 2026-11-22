@@ -1,0 +1,115 @@
+[
+  {
+    "name": "node.register 通过 JSON-RPC 注册平台节点",
+    "request": {
+      "method": "node.register",
+      "params": {
+        "node_id": "ct-go-1",
+        "name": "contract-go",
+        "capabilities": ["echo", "sys.info"],
+        "tags": ["agent", "go"],
+        "metadata": {"region": "lab"},
+        "platform": {
+          "os": "linux",
+          "arch": "amd64",
+          "runtime": "go",
+          "runtime_version": "go1.21",
+          "agent_version": "1.1.0",
+          "labels": {"env": "contract"}
+        }
+      }
+    },
+    "expect": {
+      "result": {
+        "$.node.id": "ct-go-1",
+        "$.node.name": "contract-go",
+        "$.node.status": "online",
+        "$.node.platform.os": "linux",
+        "$.node.platform.arch": "amd64",
+        "$.node.platform.runtime": "go",
+        "$.node.platform.runtime_version": "go1.21",
+        "$.node.platform.agent_version": "1.1.0",
+        "$.node.platform.labels.env": "contract"
+      }
+    },
+    "save": {"platform_node": "$.node.id"}
+  },
+  {
+    "name": "node.list 按 platform.runtime 过滤",
+    "request": {"method": "node.list", "params": {"filter": {"runtime": "go"}}},
+    "expect": {
+      "result": {
+        "$.nodes.length": 1,
+        "$.nodes[0].id": "@platform_node",
+        "$.nodes[0].platform.runtime": "go"
+      }
+    }
+  },
+  {
+    "name": "node.list 接受 platform 作为 runtime 别名",
+    "request": {"method": "node.list", "params": {"filter": {"platform": "go"}}},
+    "expect": {"result": {"$.nodes.length": 1, "$.nodes[0].id": "@platform_node"}}
+  },
+  {
+    "name": "node.list 按 platform.os 过滤",
+    "request": {"method": "node.list", "params": {"filter": {"os": "linux"}}},
+    "expect": {"result": {"$.nodes.length": {"$type": "number"}}}
+  },
+  {
+    "name": "node.register 重复注册更新节点（幂等心跳）",
+    "request": {
+      "method": "node.register",
+      "params": {
+        "node_id": "ct-go-1",
+        "name": "contract-go-renamed",
+        "platform": {"os": "linux", "arch": "arm64", "runtime": "go"}
+      }
+    },
+    "expect": {
+      "result": {
+        "$.node.id": "ct-go-1",
+        "$.node.name": "contract-go-renamed",
+        "$.node.status": "online",
+        "$.node.platform.arch": "arm64"
+      }
+    }
+  },
+  {
+    "name": "node.register 未提供 id 时引擎生成",
+    "request": {
+      "method": "node.register",
+      "params": {"platform": {"runtime": "python", "os": "linux"}}
+    },
+    "expect": {
+      "result": {
+        "$.node.id": {"$type": "string"},
+        "$.node.platform.runtime": "python"
+      }
+    }
+  },
+  {
+    "name": "node.get 返回更新后的平台描述",
+    "request": {"method": "node.get", "params": {"node_id": "@platform_node"}},
+    "expect": {
+      "result": {
+        "$.node.platform.runtime": "go",
+        "$.node.platform.arch": "arm64"
+      }
+    }
+  },
+  {
+    "name": "node.heartbeat 保持平台字段",
+    "request": {"method": "node.heartbeat", "params": {"node_id": "@platform_node"}},
+    "expect": {"result": {"$.node.id": "@platform_node", "$.node.status": "online", "$.node.platform.runtime": "go"}}
+  },
+  {
+    "name": "node.unregister 退出后 node.get 返回 -32010",
+    "request": {"method": "node.unregister", "params": {"node_id": "@platform_node"}},
+    "expect": {"result": {"$.node.id": "@platform_node"}}
+  },
+  {
+    "name": "node.get 已注销节点不存在",
+    "request": {"method": "node.get", "params": {"node_id": "@platform_node"}},
+    "expect": {"error_code": -32010}
+  }
+]

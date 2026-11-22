@@ -10,7 +10,7 @@ otherwise they degrade gracefully to HTTP.
 Contract anchor: docs/PROTOCOL.md (see repository root).
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 from .errors import (
     ERROR_AUTH_REQUIRED,
@@ -31,14 +31,22 @@ from .errors import (
     ERROR_EVENT_TYPE_NOT_SUPPORTED,
     ERROR_FEATURE_DISABLED,
     ERROR_RATE_LIMITED,
+    ERROR_SEAT_NOT_FOUND,
+    ERROR_SEAT_OCCUPIED,
+    ERROR_SEAT_EXPECT_MISMATCH,
+    ERROR_SEAT_VACANT,
     HubError,
 )
 from .client import HubClient, Subscription
+from .agent import Agent, AgentHandlerError, detect_platform
 
 __all__ = [
     "__version__",
     "HubClient",
     "Subscription",
+    "Agent",
+    "AgentHandlerError",
+    "detect_platform",
     "HubError",
     "ERROR_AUTH_REQUIRED",
     "ERROR_AUTH_INVALID",
@@ -58,4 +66,8 @@ __all__ = [
     "ERROR_EVENT_TYPE_NOT_SUPPORTED",
     "ERROR_FEATURE_DISABLED",
     "ERROR_RATE_LIMITED",
+    "ERROR_SEAT_NOT_FOUND",
+    "ERROR_SEAT_OCCUPIED",
+    "ERROR_SEAT_EXPECT_MISMATCH",
+    "ERROR_SEAT_VACANT",
 ]

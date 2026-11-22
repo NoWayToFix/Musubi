@@ -34,7 +34,7 @@ def rpc(url, method, params=None, token=None):
 def command_result_error_contract(cmd):
     """PROTOCOL §4.2：result 与 error 互斥，且与 status 一一对应。
 
-    注意：引擎序列化 result/error 时不带 omitempty —— 两个键**始终存在**
+    注意：引擎序列化 result/error 时不带 omitempty，两个键**始终存在**
     （缺省时为 null），因此必须断言「值非空」，而不是「键存在」。
 
     succeeded            → result 非空 且 error 为空
@@ -57,7 +57,7 @@ def command_result_error_contract(cmd):
 def _selftest_result_error_contract():
     """变异体自检：证明 command_result_error_contract 真的能失败。
 
-    防止再次出现「永真断言」——下列损坏的响应全部必须被拒绝。
+    防止再次出现「永真断言」，下列损坏的响应全部必须被拒绝。
     """
     broken = [
         {"status": "succeeded", "result": None, "error": None},               # 成功却无 result

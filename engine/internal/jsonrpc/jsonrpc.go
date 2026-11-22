@@ -46,6 +46,7 @@ const (
 	CodeSeatNotFound       = -32050
 	CodeSeatOccupied       = -32051
 	CodeSeatExpectMismatch = -32052
+	CodeSeatVacant         = -32053 // seat exists but has no occupant (PROTOCOL.md §4.7)
 )
 
 // Error is a JSON-RPC error object (schema common.json#/definitions/error_object).
